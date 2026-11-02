@@ -1,6 +1,7 @@
 "use server";
 
 import { refresh } from "next/cache";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import type { ActionResult } from "@/components/app/action-result";
@@ -9,6 +10,8 @@ import type { PageCopy } from "@/lib/domain/contracts";
 import {
   approvePage,
   confirmProduct,
+  deleteProduct,
+  goBackOneStep,
   quoteSupplierChoice,
   regeneratePageCopy,
   rejectPage,
@@ -267,4 +270,35 @@ export async function approvePageAction(
     conflict: CONFLICT,
     forbidden: "Your role cannot approve and publish pages.",
   });
+}
+
+/* Step back and delete ----------------------------------------------------- */
+
+/** Back to the previous gate (GATE 2 → 1, GATE 3 → 2, failed sourcing/build → the gate before). */
+export async function stepBackAction(
+  productId: string,
+  input: { note?: string },
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await goBackOneStep(ctx, { productId, note: optionalText(input.note) });
+    return undefined;
+  });
+  if (result.ok) refresh();
+  return explain(result, {
+    conflict: CONFLICT,
+    forbidden: "Your role cannot reopen that gate.",
+    rate_limited: REBUILD_LIMIT,
+  });
+}
+
+/** Deletes the product from Trendcart, then goes back to the product list. */
+export async function deleteProductAction(productId: string): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await deleteProduct(ctx, { productId });
+    return undefined;
+  });
+  if (!result.ok) {
+    return explain(result, { forbidden: "Only a Media buyer or the Owner can delete products." });
+  }
+  redirect("/app/products");
 }

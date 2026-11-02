@@ -22,6 +22,11 @@
  *   `{ part }`) without moving the product; the gate transition happens when
  *   the approval that completes the last part is presented with every part
  *   in `approval.parts`.
+ * - `step_back` returns a product to the previous gate without any AI call
+ *   (GATE 2 → GATE 1, GATE 3 → GATE 2), and a product whose sourcing or
+ *   build failed to the gate before that step. It never skips a gate
+ *   forward: the user approves the earlier gate again. Gate 4 and later
+ *   cannot step back (a campaign may exist on TikTok).
  * - The launch step has no running status: it executes while the product is
  *   `ready_to_launch`, after GATE 4 was approved. If it fails, `retry` goes
  *   back to `ready_to_launch`, so a new GATE 4 approval is required.
@@ -149,7 +154,12 @@ export type ProductEvent =
   /** A recorded rejection; only gates with `onReject` accept it. */
   | { type: "gate_rejected"; productId: string; approval: ApprovalEvidence }
   /** failed → the failed step's retry status. */
-  | { type: "retry"; step: ProductStep };
+  | { type: "retry"; step: ProductStep }
+  /**
+   * Back to the previous gate (see STEP_BACK). From `failed`, `failedStep` is
+   * the step that failed (lib/workflows/jobs latestFailedStep).
+   */
+  | { type: "step_back"; failedStep?: ProductStep | null };
 
 export class InvalidTransitionError extends Error {
   readonly from: ProductStatus;
@@ -161,6 +171,27 @@ export class InvalidTransitionError extends Error {
     this.from = from;
     this.event = event.type;
   }
+}
+
+/** Where `step_back` sends a product waiting at a gate. */
+const STEP_BACK: Partial<Record<ProductStatus, ProductStatus>> = {
+  awaiting_supplier_choice: "awaiting_product_confirmation",
+  awaiting_content_approval: "awaiting_supplier_choice",
+};
+
+/** Where `step_back` sends a product whose step failed: the gate before that step. */
+const STEP_BACK_AFTER_FAILURE: Partial<Record<ProductStep, ProductStatus>> = {
+  source: "awaiting_product_confirmation",
+  build: "awaiting_supplier_choice",
+};
+
+/** The status `step_back` leads to, or null when the product cannot step back. */
+export function stepBackTarget(
+  status: ProductStatus,
+  failedStep?: ProductStep | null,
+): ProductStatus | null {
+  if (status === "failed") return failedStep ? (STEP_BACK_AFTER_FAILURE[failedStep] ?? null) : null;
+  return STEP_BACK[status] ?? null;
 }
 
 type Result = { ok: true; to: ProductStatus } | { ok: false; reason: string };
@@ -188,6 +219,13 @@ function evaluate(from: ProductStatus, event: ProductEvent): Result {
       return from === step.running
         ? { ok: true, to: "failed" }
         : { ok: false, reason: `step "${event.step}" is not running` };
+    }
+
+    case "step_back": {
+      const to = stepBackTarget(from, event.failedStep);
+      return to
+        ? { ok: true, to }
+        : { ok: false, reason: "there is no previous step to go back to from here" };
     }
 
     case "retry":

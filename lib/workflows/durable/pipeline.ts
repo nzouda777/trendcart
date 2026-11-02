@@ -11,7 +11,7 @@
  * The workflow runtime is imported lazily so tests and the inline engine
  * never load it.
  */
-import type { Gate } from "@/lib/domain/contracts";
+import type { Gate, ProductStatus } from "@/lib/domain/contracts";
 import { GATES, rejectionTarget, type ProductStep } from "@/lib/domain/state-machine";
 import { product } from "@/lib/db/schema";
 import type { WorkspaceContext } from "@/lib/tenant/context";
@@ -21,7 +21,7 @@ import { applyProductEvent } from "../product-status";
 import { realSleep, type Sleep } from "../retry";
 import type { StepOutcome } from "../runner";
 
-import { gateHookToken, resumeHookToken, type WakePayload } from "./config";
+import { gateHookToken, nextActionFor, resumeHookToken, type WakePayload } from "./config";
 
 const WAKE_DELAYS_MS = [250, 750, 2_000];
 
@@ -111,6 +111,24 @@ export function createDurablePipeline(
         reason: "retry",
       });
       return queued(ctx, productId, step);
+    },
+
+    async wakeAfterStepBack(ctx, productId, from: ProductStatus) {
+      // The run waits on the hook of the status the product left (a gate, or
+      // the resume hook when it failed). Woken, it re-reads the status and
+      // waits on the earlier gate. No run to wake: the next gate decision
+      // starts one (wakeOrStart), so nothing is started here.
+      const next = nextActionFor(ctx.workspaceId, productId, from);
+      if (next.kind !== "wait") return;
+      for (let i = 0; ; i++) {
+        try {
+          await engine.resume(next.token, { reason: "step_back" });
+          return;
+        } catch {
+          if (i >= WAKE_DELAYS_MS.length) return;
+          await sleep(WAKE_DELAYS_MS[i]!);
+        }
+      }
     },
   };
 }

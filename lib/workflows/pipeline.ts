@@ -14,7 +14,7 @@
  *   moved the status, so the hook only wakes the run; the step re-checks the
  *   status (idempotent) before doing anything.
  */
-import type { Gate } from "@/lib/domain/contracts";
+import type { Gate, ProductStatus } from "@/lib/domain/contracts";
 import { GATES, rejectionTarget, type ProductStep } from "@/lib/domain/state-machine";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 
@@ -44,6 +44,12 @@ export interface ProductPipeline {
   ): Promise<StepOutcome | null>;
   /** After `retry` moved a failed product back into `step`. */
   resumeStep(ctx: WorkspaceContext, productId: string, step: ProductStep): Promise<StepOutcome>;
+  /**
+   * After `step_back` moved a product from `from` to an earlier gate. Nothing
+   * runs: the durable engine wakes the run waiting on `from`'s hook so it
+   * re-reads the status and waits on the earlier gate instead.
+   */
+  wakeAfterStepBack(ctx: WorkspaceContext, productId: string, from: ProductStatus): Promise<void>;
 }
 
 export { gateHookToken } from "./durable/config";
@@ -70,5 +76,8 @@ export function createInlinePipeline(deps: RunnerDeps): ProductPipeline {
     async resumeStep(ctx, productId, step) {
       return runProductStep(ctx, productId, step, deps);
     },
+
+    // Inline: no run is waiting, the next gate decision runs the next step.
+    async wakeAfterStepBack() {},
   };
 }

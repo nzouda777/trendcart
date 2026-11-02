@@ -41,17 +41,20 @@ export {
 } from "./errors";
 export {
   confirmProduct,
+  deleteProduct,
   getProduct,
   importFromProductLink,
   importFromTikTok,
   listProducts,
   rejectProduct,
   retryStep,
+  type DeleteProductResult,
   type ListProductsInput,
 } from "./products";
 export {
   approvePage,
   getProductPipeline,
+  goBackOneStep,
   listSuppliers,
   quoteSupplierChoice,
   regeneratePageCopy,

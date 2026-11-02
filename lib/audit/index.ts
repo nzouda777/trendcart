@@ -42,6 +42,10 @@ export const auditActionSchema = z.enum([
   // Gates
   "gate.approve",
   "gate.reject",
+  /** A product went back to the previous gate (no approval recorded). */
+  "gate.step_back",
+  // Products
+  "product.delete",
   // Publishing
   /** A user edited the generated page copy before GATE 3. */
   "page.update",

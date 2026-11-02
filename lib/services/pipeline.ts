@@ -6,6 +6,7 @@ import { z } from "zod";
 import { findUnsafeClaims, sanitizeDescriptionHtml } from "@/lib/ai/copy-safety";
 import { writeAudit } from "@/lib/audit";
 import { requirePermission } from "@/lib/auth/guards";
+import { gatePermission } from "@/lib/auth/permissions";
 import {
   IntegrationError,
   pageCopySchema,
@@ -13,7 +14,13 @@ import {
   type Integrations,
   type ShopifyProductRef,
 } from "@/lib/domain/contracts";
-import { missingGateParts, type ApprovalEvidence, type GatePart } from "@/lib/domain/state-machine";
+import {
+  gateForStatus,
+  missingGateParts,
+  stepBackTarget,
+  type ApprovalEvidence,
+  type GatePart,
+} from "@/lib/domain/state-machine";
 import {
   approval,
   brand,
@@ -35,6 +42,7 @@ import {
   recordGateDecision,
   type SupplierChoicePayload,
 } from "@/lib/workflows/gate-payloads";
+import { latestFailedStep } from "@/lib/workflows/jobs";
 import { applyProductEventTo } from "@/lib/workflows/product-status";
 import type { SupplierDetails } from "@/lib/workflows/steps/source";
 import {
@@ -1029,4 +1037,95 @@ function changedCopyFields(before: PageCopy, after: PageCopy): string[] {
     (k) =>
       JSON.stringify(before[k as keyof PageCopy]) !== JSON.stringify(after[k as keyof PageCopy]),
   );
+}
+
+/* Step back ---------------------------------------------------------------- */
+
+/**
+ * Sends a product back to the previous gate, without any AI call:
+ * - GATE 2 (or a failed sourcing) → GATE 1: the listings are removed, so a
+ *   new GATE 1 approval searches again.
+ * - GATE 3 (or a failed build) → GATE 2: the listings stay (none selected)
+ *   and the page copy is cleared, so the next build writes it for the new
+ *   choice and updates the same Shopify draft. Refused once the page was
+ *   approved (publishing or published).
+ * GATE 2 prices and margin are cleared either way. The caller needs the
+ * permission of the gate the product returns to. Audited (gate.step_back)
+ * and rate-limited like a rebuild: going forward again costs a new search or
+ * a new copy.
+ */
+export async function goBackOneStep(
+  ctx: WorkspaceContext,
+  input: z.input<typeof gateNoteSchema>,
+  deps: ServiceDeps = {},
+): Promise<ProductPipelineDTO> {
+  requirePermission(ctx, "product:update");
+  const v = gateNoteSchema.parse(input);
+
+  const current = await ctx.db.getById(product, v.productId);
+  const failedStep =
+    current.status === "failed" ? await latestFailedStep(ctx.db, current.id) : null;
+  const target = stepBackTarget(current.status, failedStep);
+  if (!target) {
+    throw new ServiceError("invalid_state", "This product has no previous step to go back to.");
+  }
+  requirePermission(ctx, gatePermission(gateForStatus(target)!));
+  await enforceRebuildLimit(ctx.workspaceId, current.id, deps);
+
+  const from = await ctx.db.transaction(async (tx) => {
+    const row = await lockProduct(tx, v.productId);
+    if (row.status !== current.status) {
+      throw new ServiceError(
+        "conflict",
+        "This product was updated by someone else in the meantime. Refresh and try again.",
+      );
+    }
+    if (target === "awaiting_supplier_choice") {
+      const parts = await gatePartStates(tx, row.id, "content_approval");
+      if (parts.page === "approved" || parts.page === "publishing") {
+        throw new ServiceError(
+          "invalid_state",
+          "The page was already approved and published: it cannot go back to the supplier choice.",
+        );
+      }
+    }
+    let removed = 0;
+    if (target === "awaiting_product_confirmation") {
+      removed = (await tx.delete(supplierMatch, eq(supplierMatch.productId, row.id))).length;
+    } else {
+      await tx.update(supplierMatch, { selected: false }, eq(supplierMatch.productId, row.id));
+    }
+    await applyProductEventTo(
+      tx,
+      row,
+      { type: "step_back", failedStep },
+      {
+        sellingPrice: null,
+        compareAtPrice: null,
+        margin: null,
+        ...(target === "awaiting_supplier_choice"
+          ? { pageCopy: null, pageCopyGeneratedAt: null }
+          : {}),
+      },
+    );
+    await writeAudit(
+      { ...ctx, db: tx },
+      {
+        action: "gate.step_back",
+        targetType: "product",
+        targetId: row.id,
+        metadata: {
+          from: row.status,
+          to: target,
+          ...(failedStep ? { failedStep } : {}),
+          removedListings: removed,
+          hasNote: !!v.note,
+        },
+      },
+    );
+    return row.status;
+  });
+
+  await resolvePipeline(deps).wakeAfterStepBack(ctx, v.productId, from);
+  return loadPipeline(ctx, v.productId);
 }

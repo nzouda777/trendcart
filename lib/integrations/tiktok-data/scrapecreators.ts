@@ -102,12 +102,23 @@ const first = (list: { url_list?: string[] } | null | undefined) =>
 
 const count = (n: number | undefined) => (Number.isFinite(n) && n! > 0 ? Math.floor(n!) : 0);
 
+/** HEIC/HEIF covers: Chrome, Firefox and most image tools (reverse image search) cannot read them. */
+const isHeic = (url: string) => /\.hei[cf](?:[?#~]|$)/i.test(url);
+
+/**
+ * Best cover URL: the first https JPEG/WebP/PNG across cover, origin_cover
+ * and dynamic_cover (TikTok lists a .heic and a .jpeg variant of each), else
+ * the first https URL at all. Pure: exported for tests.
+ */
+export function pickCoverUrl(video: Aweme["video"]): string | undefined {
+  const lists = [video?.cover, video?.origin_cover, video?.dynamic_cover];
+  const urls = lists.flatMap((l) => l?.url_list ?? []).filter((u) => /^https:\/\//.test(u));
+  return urls.find((u) => !isHeic(u)) ?? urls[0];
+}
+
 function toCandidate(aweme: Aweme): VideoCandidate | null {
   const username = aweme.author?.unique_id;
-  const thumbnailUrl =
-    first(aweme.video?.cover) ??
-    first(aweme.video?.origin_cover) ??
-    first(aweme.video?.dynamic_cover);
+  const thumbnailUrl = pickCoverUrl(aweme.video);
   if (!username || !thumbnailUrl) return null;
 
   const candidate = {

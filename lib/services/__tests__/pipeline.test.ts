@@ -33,6 +33,7 @@ import { listShopifyTemplates, setShopifyTemplate } from "../connections";
 import {
   approvePage,
   getProductPipeline,
+  goBackOneStep,
   listSuppliers,
   quoteSupplierChoice,
   regeneratePageCopy,
@@ -43,7 +44,7 @@ import {
   updatePageCopy,
 } from "../pipeline";
 import { toServiceFailure } from "../errors";
-import { confirmProduct, importFromTikTok, retryStep } from "../products";
+import { confirmProduct, deleteProduct, importFromTikTok, retryStep } from "../products";
 
 import { createMemoryRateLimiter } from "../rate-limit";
 import { newBrandInput, setupTestEnv, testDeps, type TestEnv } from "./helpers";
@@ -960,6 +961,141 @@ describe("GATE 3 page publish claim (M2 open questions 6 and 7)", () => {
       code: "invalid_state",
       reason: "copy_changed",
       error: "The page changed since you loaded it.",
+    });
+  });
+});
+
+describe("step back to the previous gate", () => {
+  it("GATE 2 → GATE 1 removes the listings; confirming again searches again", async () => {
+    const { productId, deps, find } = await atGate2();
+    const back = await goBackOneStep(env.a.creative, { productId, note: "Wrong variant" }, deps);
+    expect(back.status).toBe("awaiting_product_confirmation");
+    expect(back.suppliers).toEqual([]);
+    expect(back.analysis).not.toBeNull(); // no new analysis, no AI call
+    const [entry] = await env.a.owner.db.select(auditLog, {
+      where: eq(auditLog.action, "gate.step_back"),
+    });
+    expect(entry?.metadata).toMatchObject({
+      from: "awaiting_supplier_choice",
+      to: "awaiting_product_confirmation",
+      hasNote: true,
+    });
+
+    const again = await confirmProduct(env.a.creative, { productId }, deps);
+    expect(again.status).toBe("awaiting_supplier_choice");
+    expect(find).toHaveBeenCalledTimes(2);
+  });
+
+  it("GATE 3 → GATE 2 keeps the listings, resets the choice and copy, reuses the Shopify draft", async () => {
+    const { productId, deps, suppliers, createDraftProduct, writePage } = await atGate3();
+    const back = await goBackOneStep(env.a.creative, { productId }, deps);
+    expect(back.status).toBe("awaiting_supplier_choice");
+    expect(back.suppliers.map((s) => s.id).sort()).toEqual(suppliers.map((s) => s.id).sort());
+    expect(back.suppliers.some((s) => s.selected)).toBe(false);
+    expect(back.pageCopy).toBeNull();
+    expect(back.sellingPrice).toBeNull();
+
+    const other = suppliers[suppliers.length - 1]!;
+    const rebuilt = await selectSupplier(
+      env.a.creative,
+      { productId, supplierMatchId: other.id, acceptLowMargin: true },
+      deps,
+    );
+    expect(rebuilt.status).toBe("awaiting_content_approval");
+    expect(rebuilt.supplierChoice?.supplierMatchId).toBe(other.id);
+    expect(writePage).toHaveBeenCalledTimes(2);
+    expect(createDraftProduct).toHaveBeenCalledTimes(2);
+    expect(
+      await env.a.owner.db.count(shopifyProduct, eq(shopifyProduct.productId, productId)),
+    ).toBe(1);
+  });
+
+  it("a failed supplier search goes back to GATE 1", async () => {
+    const failing = mockIntegrations();
+    failing.find.mockImplementation(async () => {
+      throw new IntegrationError("serpapi", "permission_denied", "Invalid API key", {
+        retryable: false,
+      });
+    });
+    const deps = testDeps(failing.integrations);
+    const imported = await importFromTikTok(
+      env.a.creative,
+      { url: nextTikTokUrl(), brandId },
+      deps,
+    );
+    const failed = await confirmProduct(env.a.creative, { productId: imported.product.id }, deps);
+    expect(failed.status).toBe("failed");
+    const back = await goBackOneStep(env.a.creative, { productId: failed.id }, deps);
+    expect(back.status).toBe("awaiting_product_confirmation");
+  });
+
+  it("is refused at GATE 1, for viewers, and once the page was approved", async () => {
+    const gate1 = await importFromTikTok(env.a.creative, { url: nextTikTokUrl(), brandId });
+    await expect(
+      goBackOneStep(env.a.creative, { productId: gate1.product.id }),
+    ).rejects.toMatchObject({ code: "invalid_state" });
+
+    const { productId, deps } = await atGate3();
+    await expect(goBackOneStep(env.a.viewer, { productId }, deps)).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
+    await approvePage(
+      env.a.creative,
+      { productId, copyVersion: await copyVersionOf(productId) },
+      deps,
+    );
+    await expect(goBackOneStep(env.a.creative, { productId }, deps)).rejects.toMatchObject({
+      code: "invalid_state",
+    });
+    expect((await getProductPipeline(env.a.viewer, productId)).status).toBe(
+      "awaiting_content_approval",
+    );
+  });
+
+  it("workspace B cannot step back workspace A's product", async () => {
+    const { productId, deps } = await atGate2();
+    await expect(goBackOneStep(env.bOwner, { productId }, deps)).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+  });
+});
+
+describe("deleting a product", () => {
+  it("removes the product and its rows, reports the Shopify draft left, audits", async () => {
+    const { productId, deps } = await atGate3();
+    const result = await deleteProduct(env.a.media_buyer, { productId }, deps);
+    expect(result.shopifyDraftsLeft).toHaveLength(1);
+    await expect(getProductPipeline(env.a.viewer, productId)).rejects.toBeInstanceOf(NotFoundError);
+    expect(await env.a.owner.db.count(supplierMatch, eq(supplierMatch.productId, productId))).toBe(
+      0,
+    );
+    expect(await env.a.owner.db.count(approval, eq(approval.productId, productId))).toBe(0);
+    const [entry] = await env.a.owner.db.select(auditLog, {
+      where: eq(auditLog.action, "product.delete"),
+    });
+    expect(entry).toMatchObject({ targetId: productId });
+  });
+
+  it("needs product:delete (Media buyer or Owner)", async () => {
+    const { productId, deps } = await atGate2();
+    await expect(deleteProduct(env.a.creative, { productId }, deps)).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
+    await expect(deleteProduct(env.bOwner, { productId }, deps)).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+    expect((await getProductPipeline(env.a.viewer, productId)).id).toBe(productId);
+  });
+
+  it("is refused once the page was published on Shopify", async () => {
+    const { productId, deps } = await atGate3();
+    await approvePage(
+      env.a.creative,
+      { productId, copyVersion: await copyVersionOf(productId) },
+      deps,
+    );
+    await expect(deleteProduct(env.a.owner, { productId }, deps)).rejects.toMatchObject({
+      code: "invalid_state",
     });
   });
 });

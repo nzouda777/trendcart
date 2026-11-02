@@ -14,11 +14,11 @@ import {
   stepForStatus,
   type ApprovalEvidence,
 } from "@/lib/domain/state-machine";
-import { approval, brand, job, product, video } from "@/lib/db/schema";
+import { approval, brand, campaign, job, product, shopifyProduct, video } from "@/lib/db/schema";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row } from "@/lib/tenant/scoped-db";
 import { LEASE_TTL_MS } from "@/lib/workflows/concurrency";
-import { lockProduct, recordGateDecision } from "@/lib/workflows/gate-payloads";
+import { gatePartStates, lockProduct, recordGateDecision } from "@/lib/workflows/gate-payloads";
 import { findOpenJob, latestFailedStep } from "@/lib/workflows/jobs";
 import { applyProductEventTo } from "@/lib/workflows/product-status";
 
@@ -491,4 +491,93 @@ export async function rejectProduct(
     approvalId,
   );
   return loadDetail(ctx, v.productId);
+}
+
+/* Delete ------------------------------------------------------------------- */
+
+const deleteSchema = z.object({ productId: idSchema });
+
+/** Statuses a product can no longer be deleted from: a TikTok campaign may exist. */
+const UNDELETABLE: readonly ProductStatus[] = ["preparing_campaign", "ready_to_launch", "launched"];
+
+export type DeleteProductResult = {
+  /** Shopify drafts left on their store (Trendcart does not delete store products). */
+  shopifyDraftsLeft: { shopifyProductId: string; adminUrl: string | null }[];
+};
+
+/**
+ * Deletes a product and everything that hangs off it in our database
+ * (listings, video links, jobs, approvals: ON DELETE CASCADE). Refused while a
+ * step is running (unless its lease went stale), once the page was approved
+ * or published on Shopify, and from GATE 4 on or when a campaign exists.
+ * A Shopify draft created at GATE 2 is left on the store and reported back.
+ * Audited (product.delete) with the name and source link.
+ */
+export async function deleteProduct(
+  ctx: WorkspaceContext,
+  input: z.input<typeof deleteSchema>,
+  deps: ServiceDeps = {},
+): Promise<DeleteProductResult> {
+  requirePermission(ctx, "product:delete");
+  const v = deleteSchema.parse(input);
+  const now = resolveNow(deps)();
+
+  return ctx.db.transaction(async (tx) => {
+    const row = await lockProduct(tx, v.productId);
+    if (UNDELETABLE.includes(row.status)) {
+      throw new ServiceError(
+        "invalid_state",
+        "This product has reached the campaign stage and cannot be deleted.",
+      );
+    }
+    const step = stepForStatus(row.status);
+    if (step && isRunningStatus(row.status)) {
+      const open = await findOpenJob(tx, row.id, step);
+      const live =
+        open?.status === "running" && now.getTime() - open.updatedAt.getTime() <= LEASE_TTL_MS;
+      if (live) {
+        throw new ServiceError(
+          "invalid_state",
+          "A step is running for this product. Wait for it to finish, then delete it.",
+        );
+      }
+    }
+    if ((await tx.count(campaign, eq(campaign.productId, row.id))) > 0) {
+      throw new ServiceError("invalid_state", "This product has a campaign and cannot be deleted.");
+    }
+    const pages = await tx.select(shopifyProduct, { where: eq(shopifyProduct.productId, row.id) });
+    const parts = await gatePartStates(tx, row.id, "content_approval");
+    if (
+      pages.some((p) => p.status === "active") ||
+      parts.page === "approved" ||
+      parts.page === "publishing"
+    ) {
+      throw new ServiceError(
+        "invalid_state",
+        "This product's page was published on Shopify. It cannot be deleted from Trendcart.",
+      );
+    }
+
+    await tx.delete(product, eq(product.id, row.id));
+    const shopifyDraftsLeft = pages.map((p) => ({
+      shopifyProductId: p.shopifyProductId,
+      adminUrl: p.adminUrl ?? null,
+    }));
+    await writeAudit(
+      { ...ctx, db: tx },
+      {
+        action: "product.delete",
+        targetType: "product",
+        targetId: row.id,
+        metadata: {
+          name: row.name,
+          status: row.status,
+          sourceType: row.sourceType,
+          sourceUrl: row.sourceUrl,
+          shopifyDraftsLeft: shopifyDraftsLeft.map((d) => d.shopifyProductId),
+        },
+      },
+    );
+    return { shopifyDraftsLeft };
+  });
 }

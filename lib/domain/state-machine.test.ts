@@ -13,6 +13,7 @@ import {
   PRODUCT_FLOW,
   productStepSchema,
   progressOf,
+  stepBackTarget,
   rejectionTarget,
   stepForStatus,
   STEPS,
@@ -288,5 +289,44 @@ describe("gate parts (GATE 3: page, then videos)", () => {
     expect(
       transition("awaiting_supplier_choice", approve("supplier_choice", { parts: undefined })),
     ).toBe("building_page_and_videos");
+  });
+});
+
+describe("step_back", () => {
+  it("returns a waiting product to the previous gate", () => {
+    expect(transition("awaiting_supplier_choice", { type: "step_back" })).toBe(
+      "awaiting_product_confirmation",
+    );
+    expect(transition("awaiting_content_approval", { type: "step_back" })).toBe(
+      "awaiting_supplier_choice",
+    );
+  });
+
+  it("returns a failed sourcing or build to the gate before it", () => {
+    expect(transition("failed", { type: "step_back", failedStep: "source" })).toBe(
+      "awaiting_product_confirmation",
+    );
+    expect(transition("failed", { type: "step_back", failedStep: "build" })).toBe(
+      "awaiting_supplier_choice",
+    );
+  });
+
+  it("has nothing before GATE 1, nor from running steps or the campaign stage", () => {
+    for (const status of [
+      "imported",
+      "analyzing",
+      "awaiting_product_confirmation",
+      "sourcing",
+      "building_page_and_videos",
+      "preparing_campaign",
+      "ready_to_launch",
+      "launched",
+    ] as const) {
+      expect(stepBackTarget(status), status).toBeNull();
+      expect(() => transition(status, { type: "step_back" })).toThrow(InvalidTransitionError);
+    }
+    for (const failedStep of ["analyze", "prepare_campaign", "launch", null] as const) {
+      expect(stepBackTarget("failed", failedStep), String(failedStep)).toBeNull();
+    }
   });
 });

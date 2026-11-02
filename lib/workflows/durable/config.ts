@@ -30,7 +30,7 @@ export function resumeHookToken(workspaceId: string, productId: string) {
 
 /** What wakes a waiting run. Only ids: the services already did the work. */
 export type WakePayload = {
-  reason: "gate_approved" | "gate_rejected" | "retry";
+  reason: "gate_approved" | "gate_rejected" | "retry" | "step_back";
   gate?: Gate;
   approvalId?: string;
 };

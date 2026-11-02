@@ -22,6 +22,7 @@ import {
   RetryButton,
 } from "@/components/app/product/gate-actions";
 import { GateTracker } from "@/components/app/product/gate-tracker";
+import { DeleteProductButton, StepBackButton } from "@/components/app/product/product-actions";
 import { PageReview } from "@/components/app/product/page-review";
 import { pagePartState } from "@/components/app/product/page-state";
 import { SupplierChoice } from "@/components/app/product/supplier-choice";
@@ -29,8 +30,14 @@ import { STEP_LABELS, whoApproves } from "@/components/app/product-status";
 import { ProductThumb } from "@/components/app/product-thumb";
 import { DetailList, Notice, PageSkeleton, Section, Skeleton } from "@/components/app/surface";
 import { isAccessError } from "@/lib/auth/errors";
-import { can, type Role } from "@/lib/auth/permissions";
-import { isRunningStatus, PRODUCT_FLOW, stepForStatus } from "@/lib/domain/state-machine";
+import { can, gatePermission, type Role } from "@/lib/auth/permissions";
+import {
+  gateForStatus,
+  isRunningStatus,
+  PRODUCT_FLOW,
+  stepBackTarget,
+  stepForStatus,
+} from "@/lib/domain/state-machine";
 import { getProductPipeline, quoteSupplierChoice, toServiceFailure } from "@/lib/services";
 import type { ProductPipelineDTO, SupplierDTO, SupplierQuoteDTO } from "@/lib/services/types";
 import type { UserWorkspaceContext } from "@/lib/tenant/context";
@@ -43,9 +50,11 @@ import {
   regeneratePageCopyAction,
   rejectPageAction,
   rejectProductAction,
+  deleteProductAction,
   rejectSuppliersAction,
   retryStepAction,
   selectSupplierAction,
+  stepBackAction,
   updatePageCopyAction,
 } from "./actions";
 
@@ -80,6 +89,25 @@ export default function ProductPage(props: Props) {
     </div>
   );
 }
+
+const CAMPAIGN_STAGE: readonly ProductPipelineDTO["status"][] = [
+  "preparing_campaign",
+  "ready_to_launch",
+  "launched",
+];
+
+const STEP_BACK_COPY = {
+  awaiting_product_confirmation: {
+    label: "Back to product",
+    description:
+      "The product goes back to Gate 1. The supplier listings and prices are removed: confirming the product again runs a new supplier search.",
+  },
+  awaiting_supplier_choice: {
+    label: "Back to suppliers",
+    description:
+      "The product goes back to Gate 2. The listings stay, the choice, prices and page copy are reset. After a new choice the page is written again on the same Shopify draft.",
+  },
+} as const;
 
 /** Position on the happy path (failed → the step that failed). */
 function reached(product: ProductPipelineDTO, status: ProductPipelineDTO["status"]): boolean {
@@ -131,6 +159,21 @@ async function ProductDetail({ params, searchParams }: Props) {
     ? (product.suppliers.find((s) => s.id === product.supplierChoice!.supplierMatchId) ?? null)
     : null;
 
+  // Hidden when the server would refuse anyway (it checks everything again).
+  const pageLocked = ["approved", "publishing"].includes(pagePartState(product.contentParts));
+  const backTo = stepBackTarget(product.status, product.failedStep);
+  const backGate = backTo ? gateForStatus(backTo) : null;
+  const stepBack =
+    backTo && backGate && can(role, gatePermission(backGate)) && !pageLocked
+      ? STEP_BACK_COPY[backTo as keyof typeof STEP_BACK_COPY]
+      : null;
+  const canDelete =
+    can(role, "product:delete") &&
+    !CAMPAIGN_STAGE.includes(product.status) &&
+    !(running && !stalled) &&
+    !pageLocked &&
+    product.shopify?.status !== "active";
+
   return (
     <>
       {/* Also poll while the approved page is being published on Shopify
@@ -159,7 +202,25 @@ async function ProductDetail({ params, searchParams }: Props) {
             <span>Imported {formatDateTime(product.createdAt)}</span>
           </span>
         }
-        actions={<ProductStatusBadge status={product.status} />}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <ProductStatusBadge status={product.status} />
+            {stepBack ? (
+              <StepBackButton
+                label={stepBack.label}
+                description={stepBack.description}
+                onStepBack={stepBackAction.bind(null, product.id)}
+              />
+            ) : null}
+            {canDelete ? (
+              <DeleteProductButton
+                productName={product.name ?? analysis?.productName ?? "this product"}
+                hasShopifyDraft={!!product.shopify}
+                onDelete={deleteProductAction.bind(null, product.id)}
+              />
+            ) : null}
+          </div>
+        }
       />
 
       {query.existing === "1" ? (

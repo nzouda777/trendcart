@@ -358,6 +358,7 @@ describe("GATE 2 / GATE 3 service guarantees (PGlite, mock mode)", () => {
     resumeStep: async () => {
       throw new Error("not used");
     },
+    wakeAfterStepBack: async () => {},
   };
 
   beforeAll(async () => {
