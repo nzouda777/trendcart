@@ -24,3 +24,12 @@ describe("integration registry", () => {
     }
   });
 });
+
+describe("AI_MODE split", () => {
+  it("builds live analysis adapters next to mock store adapters", () => {
+    const integrations = createIntegrations("mock", "live");
+    expect(integrations.mode).toBe("mock");
+    expect(integrations.productAnalyzer).toBeTruthy();
+    expect(integrations.supplierFinder).toBeTruthy();
+  });
+});

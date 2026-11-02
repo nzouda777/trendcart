@@ -9,11 +9,12 @@ import { createTikTokDataProvider } from "@/lib/integrations/tiktok-data";
 import { createTikTokPostingClient } from "@/lib/integrations/tiktok-posting";
 import { createSupplierFinder } from "@/lib/sourcing";
 
-import { resolveIntegrationsMode } from "./mode";
+import { resolveAiMode, resolveIntegrationsMode } from "./mode";
 
 /*
  * Integration registry: resolves every adapter for INTEGRATIONS_MODE (mock by
- * default). Services call `getIntegrations()`; nothing else imports an adapter
+ * default). AI_MODE overrides it for the read-only analysis adapters
+ * (tiktokData, productAnalyzer, supplierFinder, copywriter), see ./mode. Services call `getIntegrations()`; nothing else imports an adapter
  * directly. Tests pass their own `Integrations` to services instead.
  *
  * Each adapter folder exports one factory taking the mode:
@@ -33,21 +34,30 @@ export function getIntegrationsMode(): IntegrationsMode {
 
 let cached: Integrations | undefined;
 
-export function createIntegrations(mode: IntegrationsMode): Integrations {
+/** Throws in Vercel production when AI_MODE=mock (see ./mode). */
+export function getAiMode(): IntegrationsMode {
+  return resolveAiMode();
+}
+
+export function createIntegrations(
+  mode: IntegrationsMode,
+  aiMode: IntegrationsMode = mode,
+): Integrations {
   return {
     mode,
     shopify: createShopifyClient(mode),
     tiktokAds: createTikTokAdsClient(mode),
     tiktokPosting: createTikTokPostingClient(mode),
-    tiktokData: createTikTokDataProvider(mode),
-    productAnalyzer: createProductAnalyzer(mode),
-    supplierFinder: createSupplierFinder(mode),
+    tiktokData: createTikTokDataProvider(aiMode),
+    productAnalyzer: createProductAnalyzer(aiMode),
+    supplierFinder: createSupplierFinder(aiMode),
+    // No live LLM checker yet (M2): stays on INTEGRATIONS_MODE.
     complianceChecker: createComplianceChecker(mode),
-    copywriter: createCopywriter(mode),
+    copywriter: createCopywriter(aiMode),
   };
 }
 
 export function getIntegrations(): Integrations {
-  cached ??= createIntegrations(getIntegrationsMode());
+  cached ??= createIntegrations(getIntegrationsMode(), getAiMode());
   return cached;
 }
