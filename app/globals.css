@@ -1,0 +1,235 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Class-based dark mode (next-themes, attribute="class"). */
+@custom-variant dark (&:is(.dark *));
+
+/* -------------------------------------------------------------------------- */
+/*  Trendcart design tokens                                                    */
+/*  Raw values live in :root (light) and .dark. Tailwind utilities are mapped  */
+/*  in @theme inline below, so every color is a CSS variable.                  */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Palette: black/white + Shopify green, no gradients. Emphasis comes from
+ * "doses" of green: solid `brand` fill (one primary action per view),
+ * `brand-text` (key words), `brand-soft` + `brand-border` (badges, eyebrows,
+ * highlighted cards), plain foreground everywhere else.
+ * Contrast (WCAG 2.x), light: brand-foreground on brand 4.93, on brand-hover
+ * 6.26; brand-text on background 6.99 / surface 6.52 / surface-2 6.07 /
+ * brand-soft ≥ 5.34. Dark: brand-foreground on brand 9.82, on brand-hover
+ * 11.79; brand-text on background 9.82 / surface 9.21 / surface-2 8.62 /
+ * brand-soft ≥ 7.00.
+ */
+:root {
+  /* Brand (Shopify admin green; #95BF47 is decoration-only on white) */
+  --brand: #008060;
+  --brand-foreground: #ffffff;
+  --brand-hover: #006e52;
+  --brand-soft: rgba(0, 128, 96, 0.1);
+  --brand-border: rgba(0, 128, 96, 0.35);
+  --brand-text: #00664c; /* darker than --brand so small text clears 4.5:1 on tints and surface-2 */
+
+  /* Surfaces & text */
+  --background: #ffffff;
+  --surface: #f7f7f5;
+  --surface-2: #efefec;
+  --foreground: #0a0a0a;
+  --muted-foreground: #5c5c5c;
+  --border: rgba(10, 10, 10, 0.09);
+  --border-strong: rgba(10, 10, 10, 0.16);
+  --grid-line: rgba(10, 10, 10, 0.05);
+
+  /* Status (small text ≥ 4.5:1 on surface-2 and on its own 10% tint) */
+  --success: var(--brand-text);
+  --warning: #92400e;
+  --danger: #b91c1c;
+
+  /* shadcn semantic tokens, wired to the palette above */
+  --card: var(--surface);
+  --card-foreground: var(--foreground);
+  --popover: var(--background);
+  --popover-foreground: var(--foreground);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--foreground);
+  --muted: var(--surface-2);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--foreground);
+  --destructive: var(--danger);
+  --input: var(--border-strong);
+  --ring: var(--brand); /* ≥ 4.28:1 against every light surface */
+  --radius: 0.75rem;
+}
+
+.dark {
+  /* Brand (Shopify logo green, black text on fills) */
+  --brand: #95bf47;
+  --brand-foreground: #000000;
+  --brand-hover: #a9cf63;
+  --brand-soft: rgba(149, 191, 71, 0.12);
+  --brand-border: rgba(149, 191, 71, 0.35);
+  --brand-text: #95bf47;
+
+  /* Surfaces & text */
+  --background: #000000;
+  --surface: #0b0b0b;
+  --surface-2: #141414;
+  --foreground: #f5f5f5;
+  --muted-foreground: #9a9a9a;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --grid-line: rgba(255, 255, 255, 0.045);
+
+  /* Status */
+  --success: var(--brand-text);
+  --warning: #fbbf24;
+  --danger: #f87171;
+
+  --popover: var(--surface);
+  --ring: var(--brand); /* ≥ 8.6:1 against every dark surface */
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-heading: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+
+  /* Palette */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border-strong: var(--border-strong);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-border: var(--brand-border);
+  --color-brand-text: var(--brand-text);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  /* shadcn */
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Radii */
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* Layout */
+  --container-content: 75rem; /* 1200px → max-w-content */
+
+  /* Animations */
+  --animate-marquee: marquee var(--marquee-duration, 40s) linear infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Utilities                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/* Faint grid backdrop for hero / bands. Size via --grid-size. */
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: var(--grid-size, 48px) var(--grid-size, 48px);
+}
+
+/* Visible focus ring for custom interactive elements. */
+@utility focus-ring {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  &:focus-visible {
+    outline-color: var(--ring);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Base                                                                       */
+/* -------------------------------------------------------------------------- */
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply font-sans;
+    color-scheme: light;
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem; /* sticky navbar offset for anchor links */
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Visible focus for every keyboard-focusable element. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 30%, transparent);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* Safety net: components must still opt out of JS motion via useReducedMotion. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

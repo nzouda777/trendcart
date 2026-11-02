@@ -1,0 +1,197 @@
+{
+  "_note": "Admin GraphQL 2026-10 response bodies for the M1 operations, shaped from the schema (fields checked by introspection). Replayed by live.test.ts; no network.",
+  "shopInfo": {
+    "data": {
+      "shop": {
+        "name": "Some Shop",
+        "myshopifyDomain": "some-shop.myshopify.com",
+        "currencyCode": "EUR",
+        "plan": { "publicDisplayName": "Basic" }
+      },
+      "shopLocales": [
+        { "locale": "en", "primary": false },
+        { "locale": "fr", "primary": true }
+      ]
+    },
+    "extensions": { "cost": { "requestedQueryCost": 2, "actualQueryCost": 2 } }
+  },
+  "templatesPage1": {
+    "data": {
+      "themes": {
+        "nodes": [
+          {
+            "id": "gid://shopify/OnlineStoreTheme/129834729",
+            "name": "Dawn",
+            "files": {
+              "nodes": [
+                { "filename": "templates/product.json" },
+                { "filename": "templates/product.trendcart.json" },
+                { "filename": "templates/product.pre-order.json" }
+              ],
+              "pageInfo": { "hasNextPage": true, "endCursor": "eyJsYXN0X2lkIjozfQ==" }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "templatesPage2": {
+    "data": {
+      "themes": {
+        "nodes": [
+          {
+            "id": "gid://shopify/OnlineStoreTheme/129834729",
+            "name": "Dawn",
+            "files": {
+              "nodes": [
+                { "filename": "templates/product.bundle.json" },
+                { "filename": "templates/products-legacy.json" },
+                { "filename": "templates/product.trendcart.json" }
+              ],
+              "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "noMainTheme": { "data": { "themes": { "nodes": [] } } },
+  "definitionsPartial": {
+    "data": {
+      "highlights": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1001",
+            "namespace": "custom",
+            "key": "highlights",
+            "type": { "name": "list.single_line_text_field" }
+          }
+        ]
+      },
+      "faq": { "nodes": [] },
+      "guarantee": { "nodes": [] }
+    }
+  },
+  "definitionsAll": {
+    "data": {
+      "highlights": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1001",
+            "namespace": "custom",
+            "key": "highlights",
+            "type": { "name": "list.single_line_text_field" }
+          }
+        ]
+      },
+      "faq": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1002",
+            "namespace": "custom",
+            "key": "faq",
+            "type": { "name": "json" }
+          }
+        ]
+      },
+      "guarantee": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1003",
+            "namespace": "custom",
+            "key": "guarantee",
+            "type": { "name": "multi_line_text_field" }
+          }
+        ]
+      },
+      "product_id": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1004",
+            "namespace": "trendcart",
+            "key": "product_id",
+            "type": { "name": "id" }
+          }
+        ]
+      }
+    }
+  },
+  "definitionsWrongType": {
+    "data": {
+      "highlights": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1001",
+            "namespace": "custom",
+            "key": "highlights",
+            "type": { "name": "single_line_text_field" }
+          }
+        ]
+      },
+      "faq": { "nodes": [] },
+      "guarantee": { "nodes": [] }
+    }
+  },
+  "definitionCreated": {
+    "data": {
+      "metafieldDefinitionCreate": {
+        "createdDefinition": { "id": "gid://shopify/MetafieldDefinition/2001" },
+        "userErrors": []
+      }
+    }
+  },
+  "definitionTaken": {
+    "data": {
+      "metafieldDefinitionCreate": {
+        "createdDefinition": null,
+        "userErrors": [
+          {
+            "field": ["definition", "key"],
+            "message": "Key is in use for Product metafields on the 'custom' namespace.",
+            "code": "TAKEN"
+          }
+        ]
+      }
+    }
+  },
+  "definitionPinnedLimit": {
+    "data": {
+      "metafieldDefinitionCreate": {
+        "createdDefinition": null,
+        "userErrors": [
+          {
+            "field": ["definition"],
+            "message": "Limit of 20 pinned definitions reached.",
+            "code": "PINNED_LIMIT_REACHED"
+          }
+        ]
+      }
+    }
+  },
+  "throttled": {
+    "errors": [
+      {
+        "message": "Throttled",
+        "extensions": {
+          "code": "THROTTLED",
+          "documentation": "https://shopify.dev/api/usage/rate-limits"
+        }
+      }
+    ],
+    "extensions": {
+      "cost": {
+        "requestedQueryCost": 12,
+        "actualQueryCost": null,
+        "throttleStatus": { "maximumAvailable": 2000, "currentlyAvailable": 2, "restoreRate": 100 }
+      }
+    }
+  },
+  "accessDenied": {
+    "errors": [
+      {
+        "message": "Access denied for themes field. Required access: `read_themes` access scope.",
+        "extensions": { "code": "ACCESS_DENIED" }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+allowBuilds:
+  '@swc/core': false
+  cbor-extract: false
+  esbuild: true
+  sharp: false
+  unrs-resolver: false
+minimumReleaseAgeExclude:
+  - '@ai-sdk/anthropic@4.0.88'
+  - '@ai-sdk/gateway@4.0.126'
+  - '@ai-sdk/google@4.0.105'
+  - '@ai-sdk/openai@4.0.102'
+  - '@ai-sdk/perplexity@5.0.20'
+  - '@ai-sdk/provider-utils@5.0.68'
+  - '@ai-sdk/provider@4.0.34'
+  - ai@7.0.153

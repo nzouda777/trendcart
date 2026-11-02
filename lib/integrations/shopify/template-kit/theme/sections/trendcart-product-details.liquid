@@ -1,0 +1,99 @@
+{%- comment -%}
+  Trendcart product details (Online Store 2.0 section).
+  Renders the product metafields Trendcart fills on every generated page:
+    custom.highlights  list.single_line_text_field
+    custom.faq         json  [{ "question": "...", "answer": "..." }]
+    custom.guarantee   multi_line_text_field
+  Nothing renders for a metafield that is empty, so the section is safe on any
+  product. No JavaScript; the FAQ uses native <details> (keyboard accessible).
+{%- endcomment -%}
+
+{%- liquid
+  assign highlights = product.metafields.custom.highlights.value
+  assign faq = product.metafields.custom.faq.value
+  assign guarantee = product.metafields.custom.guarantee
+-%}
+
+{%- if highlights != blank or faq != blank or guarantee != blank -%}
+  <section
+    class="trendcart-details page-width"
+    style="--tc-pad-top: {{ section.settings.padding_top }}px; --tc-pad-bottom: {{ section.settings.padding_bottom }}px;"
+  >
+    {%- if section.settings.show_highlights and highlights != blank -%}
+      <div class="trendcart-details__block">
+        {%- if section.settings.highlights_heading != blank -%}
+          <h2 class="trendcart-details__heading h3">{{ section.settings.highlights_heading | escape }}</h2>
+        {%- endif -%}
+        <ul class="trendcart-details__highlights" role="list">
+          {%- for item in highlights -%}
+            <li>{{ item | escape }}</li>
+          {%- endfor -%}
+        </ul>
+      </div>
+    {%- endif -%}
+
+    {%- if section.settings.show_guarantee and guarantee != blank -%}
+      <div class="trendcart-details__block trendcart-details__guarantee">
+        {%- if section.settings.guarantee_heading != blank -%}
+          <h2 class="trendcart-details__heading h3">{{ section.settings.guarantee_heading | escape }}</h2>
+        {%- endif -%}
+        <p>{{ guarantee.value | escape | newline_to_br }}</p>
+      </div>
+    {%- endif -%}
+
+    {%- if section.settings.show_faq and faq != blank -%}
+      <div class="trendcart-details__block">
+        {%- if section.settings.faq_heading != blank -%}
+          <h2 class="trendcart-details__heading h3">{{ section.settings.faq_heading | escape }}</h2>
+        {%- endif -%}
+        <div class="trendcart-details__faq">
+          {%- for item in faq -%}
+            {%- if item.question != blank and item.answer != blank -%}
+              <details class="trendcart-details__faq-item">
+                <summary>{{ item.question | escape }}</summary>
+                <p>{{ item.answer | escape | newline_to_br }}</p>
+              </details>
+            {%- endif -%}
+          {%- endfor -%}
+        </div>
+      </div>
+    {%- endif -%}
+  </section>
+{%- endif -%}
+
+{% style %}
+  .trendcart-details {
+    display: grid;
+    gap: 2.4rem;
+    padding-top: var(--tc-pad-top);
+    padding-bottom: var(--tc-pad-bottom);
+  }
+  .trendcart-details__heading { margin: 0 0 1rem; }
+  .trendcart-details__highlights { margin: 0; padding-left: 1.2em; display: grid; gap: 0.4rem; }
+  .trendcart-details__guarantee p { margin: 0; }
+  .trendcart-details__faq { display: grid; gap: 0.8rem; }
+  .trendcart-details__faq-item { border-bottom: 1px solid rgba(var(--color-foreground, 0, 0, 0), 0.15); padding-bottom: 0.8rem; }
+  .trendcart-details__faq-item summary { cursor: pointer; font-weight: 600; }
+  .trendcart-details__faq-item summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+  .trendcart-details__faq-item p { margin: 0.6rem 0 0; }
+{% endstyle %}
+
+{% schema %}
+{
+  "name": "Trendcart details",
+  "tag": "div",
+  "class": "section",
+  "enabled_on": { "templates": ["product"] },
+  "settings": [
+    { "type": "checkbox", "id": "show_highlights", "label": "Show highlights", "default": true },
+    { "type": "text", "id": "highlights_heading", "label": "Highlights heading", "default": "Why you'll love it" },
+    { "type": "checkbox", "id": "show_guarantee", "label": "Show guarantee", "default": true },
+    { "type": "text", "id": "guarantee_heading", "label": "Guarantee heading", "default": "Our guarantee" },
+    { "type": "checkbox", "id": "show_faq", "label": "Show FAQ", "default": true },
+    { "type": "text", "id": "faq_heading", "label": "FAQ heading", "default": "Frequently asked questions" },
+    { "type": "range", "id": "padding_top", "label": "Top padding", "min": 0, "max": 100, "step": 4, "unit": "px", "default": 36 },
+    { "type": "range", "id": "padding_bottom", "label": "Bottom padding", "min": 0, "max": 100, "step": 4, "unit": "px", "default": 36 }
+  ],
+  "presets": [{ "name": "Trendcart details" }]
+}
+{% endschema %}

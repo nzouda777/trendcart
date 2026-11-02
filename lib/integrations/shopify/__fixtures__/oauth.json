@@ -1,0 +1,37 @@
+{
+  "_note": "Shape of a Shopify OAuth callback and token responses (authorization code grant, expiring=1), per shopify.dev 2026-10. Secret for the signature: \"hush\". The hmac was computed independently of lib/integrations/shopify (node crypto one-liner).",
+  "secret": "hush",
+  "callbackQuery": {
+    "code": "0907a61c0c8d55e99db179b68161bc00",
+    "hmac": "24630881034f50fae58fa0fcc8f52fa750be222d74ccce49bed684fd9cdee5ea",
+    "shop": "some-shop.myshopify.com",
+    "state": "Zk1hY2tTdGF0ZVZhbHVlRm9yVGVzdHMwMDAwMDAwMDA",
+    "timestamp": "1337178173"
+  },
+  "tokenResponse": {
+    "access_token": "shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "scope": "write_products,read_themes,write_files,write_publications",
+    "expires_in": 3600,
+    "refresh_token": "shprt_wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+    "refresh_token_expires_in": 7776000
+  },
+  "tokenResponseMissingScopes": {
+    "access_token": "shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "scope": "write_products",
+    "expires_in": 3600,
+    "refresh_token": "shprt_wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+    "refresh_token_expires_in": 7776000
+  },
+  "refreshResponse": {
+    "access_token": "shpat_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+    "expires_in": 3600,
+    "refresh_token": "shprt_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    "refresh_token_expires_in": 7776000,
+    "scope": "write_products,read_themes,write_files,write_publications"
+  },
+  "webhook": {
+    "topic": "app/uninstalled",
+    "body": "{\"id\":1,\"name\":\"Some Shop\",\"domain\":\"some-shop.myshopify.com\",\"myshopify_domain\":\"some-shop.myshopify.com\"}",
+    "hmac": "hRUoHmp8lkkKOOPhi5csjJNGHW7xetcuCE4Y0S3Yf14="
+  }
+}

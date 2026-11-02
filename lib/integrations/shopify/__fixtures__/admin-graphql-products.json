@@ -1,0 +1,319 @@
+{
+  "_note": "Admin GraphQL 2026-10 response bodies for the M2 product operations (productByIdentifier, productSet, productUpdate, publications, publishablePublish, product, fileDelete), shaped from the 2026-10 schema. Replayed by live.products.test.ts; no network. Image CDN names carry the tc-<sha256(url)[0..16]> marker Trendcart sets as filename.",
+  "definitionsAll": {
+    "data": {
+      "highlights": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1001",
+            "namespace": "custom",
+            "key": "highlights",
+            "type": { "name": "list.single_line_text_field" }
+          }
+        ]
+      },
+      "faq": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1002",
+            "namespace": "custom",
+            "key": "faq",
+            "type": { "name": "json" }
+          }
+        ]
+      },
+      "guarantee": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1003",
+            "namespace": "custom",
+            "key": "guarantee",
+            "type": { "name": "multi_line_text_field" }
+          }
+        ]
+      },
+      "product_id": {
+        "nodes": [
+          {
+            "id": "gid://shopify/MetafieldDefinition/1004",
+            "namespace": "trendcart",
+            "key": "product_id",
+            "type": { "name": "id" }
+          }
+        ]
+      }
+    }
+  },
+  "productNotFound": { "data": { "productByIdentifier": null } },
+  "productExisting": {
+    "data": {
+      "productByIdentifier": {
+        "id": "gid://shopify/Product/8123456789012",
+        "variants": {
+          "nodes": [
+            {
+              "id": "gid://shopify/ProductVariant/4400000000001",
+              "selectedOptions": [{ "name": "Color", "value": "Orange" }]
+            },
+            {
+              "id": "gid://shopify/ProductVariant/4400000000002",
+              "selectedOptions": [{ "name": "Color", "value": "Green" }]
+            }
+          ]
+        },
+        "media": {
+          "nodes": [
+            {
+              "id": "gid://shopify/MediaImage/3300000000001",
+              "mediaContentType": "IMAGE",
+              "status": "READY",
+              "preview": {
+                "image": {
+                  "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/tc-088763f4882c386a_6f1d2c7e-1b7a-4e2e-9a63-2a0c6e0d9d11.jpg?v=1761400000"
+                }
+              },
+              "image": {
+                "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/tc-088763f4882c386a_6f1d2c7e-1b7a-4e2e-9a63-2a0c6e0d9d11.jpg?v=1761400000"
+              }
+            },
+            {
+              "id": "gid://shopify/MediaImage/3300000000002",
+              "mediaContentType": "IMAGE",
+              "status": "READY",
+              "preview": {
+                "image": {
+                  "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/tc-055f461f13094853.png?v=1761400001"
+                }
+              },
+              "image": {
+                "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/tc-055f461f13094853.png?v=1761400001"
+              }
+            },
+            {
+              "id": "gid://shopify/Video/3300000000003",
+              "mediaContentType": "VIDEO",
+              "status": "READY",
+              "preview": {
+                "image": {
+                  "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/preview_images/abc123.thumbnail.0000000000.jpg?v=1761400002"
+                }
+              }
+            },
+            {
+              "id": "gid://shopify/MediaImage/3300000000004",
+              "mediaContentType": "IMAGE",
+              "status": "READY",
+              "preview": {
+                "image": {
+                  "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/IMG_2041.jpg?v=1761400003"
+                }
+              },
+              "image": {
+                "url": "https://cdn.shopify.com/s/files/1/0712/3456/7890/files/IMG_2041.jpg?v=1761400003"
+              }
+            },
+            {
+              "id": "gid://shopify/MediaImage/3300000000005",
+              "mediaContentType": "IMAGE",
+              "status": "PROCESSING",
+              "preview": { "image": null },
+              "image": null
+            }
+          ]
+        }
+      }
+    },
+    "extensions": { "cost": { "requestedQueryCost": 27, "actualQueryCost": 9 } }
+  },
+  "productSetCreated": {
+    "data": {
+      "productSet": {
+        "product": {
+          "id": "gid://shopify/Product/8123456789012",
+          "handle": "led-sunset-lamp",
+          "status": "DRAFT",
+          "onlineStoreUrl": null,
+          "onlineStorePreviewUrl": "https://some-shop.myshopify.com/products_preview?preview_key=5b0f3c1a9e2d47c86a1e0b7d2f4c9a31"
+        },
+        "userErrors": []
+      }
+    },
+    "extensions": { "cost": { "requestedQueryCost": 10, "actualQueryCost": 10 } }
+  },
+  "productSetUpdatedActive": {
+    "data": {
+      "productSet": {
+        "product": {
+          "id": "gid://shopify/Product/8123456789012",
+          "handle": "led-sunset-lamp",
+          "status": "ACTIVE",
+          "onlineStoreUrl": "https://some-shop.myshopify.com/products/led-sunset-lamp",
+          "onlineStorePreviewUrl": "https://some-shop.myshopify.com/products_preview?preview_key=5b0f3c1a9e2d47c86a1e0b7d2f4c9a31"
+        },
+        "userErrors": []
+      }
+    }
+  },
+  "productSetUserErrors": {
+    "data": {
+      "productSet": {
+        "product": null,
+        "userErrors": [
+          {
+            "field": ["input", "variants", "0", "price"],
+            "message": "Price must be greater than or equal to 0",
+            "code": "INVALID_VARIANT"
+          }
+        ]
+      }
+    }
+  },
+  "productActivated": {
+    "data": {
+      "productUpdate": {
+        "product": { "id": "gid://shopify/Product/8123456789012" },
+        "userErrors": []
+      }
+    }
+  },
+  "productActivateMissing": {
+    "data": {
+      "productUpdate": {
+        "product": null,
+        "userErrors": [{ "field": ["id"], "message": "Product does not exist" }]
+      }
+    }
+  },
+  "productDrafted": {
+    "data": {
+      "productUpdate": {
+        "product": {
+          "id": "gid://shopify/Product/8123456789012",
+          "handle": "led-sunset-lamp",
+          "status": "DRAFT",
+          "onlineStoreUrl": null,
+          "onlineStorePreviewUrl": "https://some-shop.myshopify.com/products_preview?preview_key=5b0f3c1a9e2d47c86a1e0b7d2f4c9a31"
+        },
+        "userErrors": []
+      }
+    }
+  },
+  "productDraftMissing": {
+    "data": {
+      "productUpdate": {
+        "product": null,
+        "userErrors": [{ "field": ["id"], "message": "Product does not exist" }]
+      }
+    }
+  },
+  "productDraftInvalid": {
+    "data": {
+      "productUpdate": {
+        "product": null,
+        "userErrors": [{ "field": ["status"], "message": "Status is not included in the list" }]
+      }
+    }
+  },
+  "publications": {
+    "data": {
+      "publications": {
+        "nodes": [
+          {
+            "id": "gid://shopify/Publication/1001",
+            "catalog": {
+              "title": "Point of Sale",
+              "apps": { "nodes": [{ "handle": "pos" }] }
+            }
+          },
+          {
+            "id": "gid://shopify/Publication/1002",
+            "catalog": {
+              "title": "Online Store",
+              "apps": { "nodes": [{ "handle": "online_store" }] }
+            }
+          }
+        ],
+        "pageInfo": { "hasNextPage": false, "endCursor": null }
+      }
+    }
+  },
+  "publicationsNoOnlineStore": {
+    "data": {
+      "publications": {
+        "nodes": [
+          {
+            "id": "gid://shopify/Publication/1001",
+            "catalog": { "title": "Point of Sale", "apps": { "nodes": [{ "handle": "pos" }] } }
+          }
+        ],
+        "pageInfo": { "hasNextPage": false, "endCursor": null }
+      }
+    }
+  },
+  "published": { "data": { "publishablePublish": { "userErrors": [] } } },
+  "productRefActive": {
+    "data": {
+      "product": {
+        "id": "gid://shopify/Product/8123456789012",
+        "handle": "led-sunset-lamp",
+        "status": "ACTIVE",
+        "onlineStoreUrl": "https://some-shop.myshopify.com/products/led-sunset-lamp",
+        "onlineStorePreviewUrl": "https://some-shop.myshopify.com/products_preview?preview_key=5b0f3c1a9e2d47c86a1e0b7d2f4c9a31"
+      }
+    }
+  },
+  "fileDeleted": {
+    "data": {
+      "fileDelete": {
+        "deletedFileIds": ["gid://shopify/Video/3300000000003"],
+        "userErrors": []
+      }
+    }
+  },
+  "fileDeleteAlreadyGone": {
+    "data": {
+      "fileDelete": {
+        "deletedFileIds": [],
+        "userErrors": [
+          {
+            "field": ["fileIds"],
+            "message": "File id gid://shopify/Video/3300000000003 does not exist.",
+            "code": "FILE_DOES_NOT_EXIST"
+          }
+        ]
+      }
+    }
+  },
+  "fileDeleteLocked": {
+    "data": {
+      "fileDelete": {
+        "deletedFileIds": [],
+        "userErrors": [
+          {
+            "field": ["fileIds"],
+            "message": "File is currently being processed.",
+            "code": "FILE_LOCKED"
+          }
+        ]
+      }
+    }
+  },
+  "throttledLowBucket": {
+    "errors": [
+      {
+        "message": "Throttled",
+        "extensions": {
+          "code": "THROTTLED",
+          "documentation": "https://shopify.dev/api/usage/rate-limits"
+        }
+      }
+    ],
+    "extensions": {
+      "cost": {
+        "requestedQueryCost": 152,
+        "actualQueryCost": null,
+        "throttleStatus": { "maximumAvailable": 2000, "currentlyAvailable": 2, "restoreRate": 100 }
+      }
+    }
+  }
+}
