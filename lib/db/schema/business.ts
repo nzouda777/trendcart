@@ -661,11 +661,39 @@ export const usageMonthly = pgTable(
 );
 
 /**
+ * Workspace settings (one row per workspace, created on first save). Every
+ * null column means "use the default" (env var or built-in value), see
+ * lib/settings.
+ */
+export const workspaceSettings = pgTable(
+  "workspace_settings",
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    /** Gemini model for product analysis (lib/domain/settings ANALYSIS_MODELS). */
+    analysisModel: text("analysis_model"),
+    /** Claude model for page copy (COPYWRITING_MODELS). */
+    copywritingModel: text("copywriting_model"),
+    /** Monthly AI + paid API budget; 0 disables AI calls. */
+    aiMonthlyCapUsd: numeric("ai_monthly_cap_usd", { precision: 10, scale: 2, mode: "number" }),
+    /** Whole product analysis (download, upload, model call). */
+    analysisTimeoutSec: integer("analysis_timeout_sec"),
+    /** One page copy generation. */
+    copywritingTimeoutSec: integer("copywriting_timeout_sec"),
+    updatedBy: text("updated_by"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("workspace_settings_workspace_uidx").on(t.workspaceId)],
+);
+
+/**
  * Every workspace-scoped table. lib/tenant/scoped-db only accepts these.
  * Add new business tables here, or they cannot be queried.
  */
 export const businessTables = {
   brand,
+  workspaceSettings,
   proxy,
   shopifyConnection,
   tiktokAdConnection,

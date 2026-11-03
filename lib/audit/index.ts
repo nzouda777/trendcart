@@ -25,6 +25,7 @@ export const auditActionSchema = z.enum([
   // Workspace and members
   "workspace.create",
   "workspace.update",
+  "settings.update",
   "member.invite",
   "member.join",
   "member.role_change",

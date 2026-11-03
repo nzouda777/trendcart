@@ -66,3 +66,8 @@ export {
 export { listMembers, type MemberDirectory } from "./team";
 export type * from "./types";
 export { getUsage, listUsage } from "./usage";
+export {
+  getWorkspaceSettings,
+  updateWorkspaceSettings,
+  type WorkspaceSettingsDTO,
+} from "./settings";

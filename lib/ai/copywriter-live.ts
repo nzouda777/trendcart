@@ -35,6 +35,7 @@ import {
   type ProductAnalysis,
   type SupplierListing,
 } from "@/lib/domain/contracts";
+import { DEFAULT_COPYWRITING_TIMEOUT_SEC } from "@/lib/domain/settings";
 import { httpStatusError, networkError } from "@/lib/integrations/tiktok-data/http";
 
 import { findUnsafeClaims, sanitizeDescriptionHtml, type UnsafeClaim } from "./copy-safety";
@@ -211,6 +212,8 @@ export type LiveCopywriterOptions = {
   apiKey?: string;
   effort?: "low" | "medium" | "high";
   now?: () => Date;
+  /** Overrides the page time limit (tests). */
+  timeoutMs?: number;
 };
 
 function mapModelError(error: unknown): never {
@@ -241,25 +244,34 @@ const inputSchema = z.object({
   hint: copyHintSchema.optional(),
 });
 
+/** Default time limit for one page (Settings can change it, 30 to 270 s). */
+export const COPYWRITING_TIMEOUT_MS = DEFAULT_COPYWRITING_TIMEOUT_SEC * 1000;
+
 export function createLiveCopywriter(options: LiveCopywriterOptions = {}): Copywriter {
-  const modelId = options.modelId ?? modelIds().copywriting;
+  const defaultModelId = options.modelId ?? modelIds().copywriting;
   const now = options.now ?? (() => new Date());
-  let model = options.model;
-  const getModel = () => {
-    if (model) return model;
+  // One model instance per id: the workspace Settings can pick another model.
+  const models = new Map<string, LanguageModel>();
+  const getModel = (modelId: string) => {
+    if (options.model) return options.model;
+    const cached = models.get(modelId);
+    if (cached) return cached;
     const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       throw new IntegrationError(PROVIDER, "permission_denied", "ANTHROPIC_API_KEY is not set.", {
         retryable: false,
       });
     }
-    return (model = createAnthropic({ apiKey })(modelId));
+    const created = createAnthropic({ apiKey })(modelId);
+    models.set(modelId, created);
+    return created;
   };
 
-  async function generate(prompt: string) {
+  async function generate(prompt: string, modelId: string, budget: AbortSignal) {
     try {
       const result = await generateText({
-        model: getModel(),
+        model: getModel(modelId),
+        abortSignal: budget,
         system: COPY_RULES,
         prompt,
         output: Output.object({ schema: modelCopySchema, name: "page_copy" }),
@@ -295,13 +307,19 @@ export function createLiveCopywriter(options: LiveCopywriterOptions = {}): Copyw
 
   return {
     async writePage(ctx, raw) {
-      callContextSchema.parse(ctx);
+      const callCtx = callContextSchema.parse(ctx);
       const input = inputSchema.parse(raw);
+      // Workspace Settings (CallContext.ai) override the defaults. The time limit covers
+      // the whole page (both attempts) and ends with a retryable timeout error.
+      const modelId = callCtx.ai?.copywritingModel ?? defaultModelId;
+      const budget = AbortSignal.timeout(
+        options.timeoutMs ?? callCtx.ai?.copywritingTimeoutMs ?? COPYWRITING_TIMEOUT_MS,
+      );
       const usage: AiUsage[] = [];
       let feedback: UnsafeClaim[] | undefined;
 
       for (let attempt = 0; attempt < 2; attempt++) {
-        const res = await generate(userPrompt({ ...input, feedback }));
+        const res = await generate(userPrompt({ ...input, feedback }), modelId, budget);
         usage.push(res.usage);
         const copy = toPageCopy(res.output);
         if (!copy) {

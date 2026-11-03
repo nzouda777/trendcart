@@ -5,6 +5,7 @@ import {
   LayoutDashboardIcon,
   PackageIcon,
   PlugIcon,
+  SettingsIcon,
   UsersIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -32,6 +33,7 @@ export const APP_NAV: NavItem[] = [
   { href: "/app/connections", label: "Connections", icon: PlugIcon, permission: "connection:read" },
   { href: "/app/team", label: "Team", icon: UsersIcon, permission: "workspace:read" },
   { href: "/app/usage", label: "Usage", icon: GaugeIcon, permission: "usage:read" },
+  { href: "/app/settings", label: "Settings", icon: SettingsIcon, permission: "workspace:read" },
 ];
 
 export function isNavActive(pathname: string, href: string) {

@@ -42,7 +42,27 @@ export type GeminiFilesConfig = {
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Overall budget of the caller: aborts the upload and stops polling. */
+  signal?: AbortSignal;
 };
+
+/** Per-request timeout, cut short by the caller's overall budget. */
+function withBudget(ms: number, budget?: AbortSignal): AbortSignal {
+  const own = AbortSignal.timeout(ms);
+  return budget ? AbortSignal.any([own, budget]) : own;
+}
+
+function tooSlow(): IntegrationError {
+  // Retryable: the workflow engine retries later with backoff.
+  return new IntegrationError(
+    PROVIDER,
+    "provider_error",
+    "Gemini took too long to process the video.",
+    {
+      retryable: true,
+    },
+  );
+}
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -126,6 +146,7 @@ export async function uploadToGeminiFiles(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ file: { display_name: displayName } }),
+      signal: withBudget(30_000, config.signal),
     }),
   );
   if (!start.ok) {
@@ -154,7 +175,7 @@ export async function uploadToGeminiFiles(
       body: body as unknown as BodyInit,
       duplex: "half",
       // Large uploads can take longer than the default request timeout.
-      signal: AbortSignal.timeout(120_000),
+      signal: withBudget(120_000, config.signal),
     }),
   );
   if (!uploaded.ok) return fail(uploaded);
@@ -171,18 +192,18 @@ export async function uploadToGeminiFiles(
   }
 
   let file = parsed.data.file;
-  const deadline = Date.now() + (config.pollTimeoutMs ?? 120_000);
+  const deadline = Date.now() + (config.pollTimeoutMs ?? 90_000);
   while (file.state === "PROCESSING" || file.state === "STATE_UNSPECIFIED") {
-    if (Date.now() > deadline) {
-      throw new IntegrationError(
-        PROVIDER,
-        "provider_error",
-        "Gemini took too long to process the video.",
-      );
+    if (Date.now() > deadline || config.signal?.aborted) {
+      await deleteGeminiFile(config, file.name);
+      throw tooSlow();
     }
     await sleep(config.pollIntervalMs ?? 2_000);
     const res = await call(() =>
-      config.fetch(`${base}/v1beta/${file.name}`, { headers: { "x-goog-api-key": config.apiKey } }),
+      config.fetch(`${base}/v1beta/${file.name}`, {
+        headers: { "x-goog-api-key": config.apiKey },
+        signal: withBudget(15_000, config.signal),
+      }),
     );
     if (!res.ok) return fail(res);
     file = fileSchema.parse(await res.json());
@@ -202,9 +223,11 @@ export async function uploadToGeminiFiles(
 export async function deleteGeminiFile(config: GeminiFilesConfig, name: string): Promise<void> {
   const base = (config.baseUrl ?? GEMINI_BASE_URL).replace(/\/$/, "");
   try {
+    // Own short timeout, not the caller's budget: cleanup still runs after it expires.
     const res = await config.fetch(`${base}/v1beta/${name}`, {
       method: "DELETE",
       headers: { "x-goog-api-key": config.apiKey },
+      signal: AbortSignal.timeout(10_000),
     });
     await res.body?.cancel().catch(() => undefined);
   } catch {

@@ -10,6 +10,8 @@
  */
 import { z } from "zod";
 
+import { aiCallSettingsSchema } from "./settings";
+
 /* -------------------------------------------------------------------------- */
 /* Shared primitives                                                          */
 /* -------------------------------------------------------------------------- */
@@ -65,6 +67,8 @@ export const callContextSchema = z.object({
   brandId: z.string().min(1).optional(),
   /** Decrypted proxy URL when the brand has an enabled proxy. */
   proxyUrl: z.url().optional(),
+  /** Workspace AI settings (models, time limits); adapters default the rest. */
+  ai: aiCallSettingsSchema.optional(),
 });
 export type CallContext = z.infer<typeof callContextSchema>;
 

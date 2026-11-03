@@ -20,7 +20,7 @@ import "server-only";
  */
 import { eq, sql } from "drizzle-orm";
 
-import { usageMonthly } from "@/lib/db/schema";
+import { usageMonthly, workspaceSettings } from "@/lib/db/schema";
 import {
   aiUsageSchema,
   IntegrationError,
@@ -70,7 +70,13 @@ export async function getAiBudget(
   db: ScopedDb,
   options: BudgetOptions = {},
 ): Promise<BudgetStatus> {
-  const capUsd = options.capUsd ?? getAiMonthlyCapUsd();
+  // Explicit option, then the workspace's saved cap (Settings), then AI_MONTHLY_CAP_USD.
+  const saved = options.capUsd === undefined ? await db.findFirst(workspaceSettings) : undefined;
+  const capUsd =
+    options.capUsd ??
+    (saved?.aiMonthlyCapUsd === null || saved?.aiMonthlyCapUsd === undefined
+      ? getAiMonthlyCapUsd()
+      : Number(saved.aiMonthlyCapUsd));
   const usage = await getMonthlyUsage(db, (options.now ?? (() => new Date()))());
   const remainingUsd = Math.max(0, capUsd - usage.aiCostUsd);
   return { ...usage, capUsd, remainingUsd, exceeded: usage.aiCostUsd >= capUsd };

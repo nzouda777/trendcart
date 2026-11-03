@@ -9,6 +9,12 @@ import "server-only";
  * product_link: the page is fetched through the brand proxy, reduced to text
  *   (title, meta, JSON-LD, visible text) and analysed as text.
  *
+ * Time budget: one analysis (media fetch, upload, processing, model call)
+ * stops after ANALYZE_BUDGET_MS with a retryable error, so the workflow step
+ * ends cleanly and is retried with backoff instead of being killed by the
+ * function's max duration (which makes the queue redeliver a crashed step).
+ * Thinking is kept "low": identification needs perception, not long reasoning.
+ *
  * The model fills `modelAnalysisSchema` (structured output); the adapter adds
  * referenceImageUrl from trusted sources (never a model-invented URL) and
  * validates the result with the contract's productAnalysisSchema.
@@ -40,6 +46,8 @@ import {
   networkError,
   type HttpFetch,
 } from "@/lib/integrations/tiktok-data/http";
+
+import { DEFAULT_ANALYSIS_TIMEOUT_SEC } from "@/lib/domain/settings";
 
 import { deleteGeminiFile, uploadToGeminiFiles, type GeminiFilesConfig } from "./gemini-files";
 import { extractPage } from "./page-text";
@@ -126,6 +134,8 @@ export type LiveAnalyzerOptions = {
   geminiBaseUrl?: string;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
+  /** Overrides ANALYZE_BUDGET_MS (tests). */
+  budgetMs?: number;
 };
 
 function mapModelError(error: unknown): never {
@@ -148,10 +158,20 @@ function mapModelError(error: unknown): never {
   throw networkError("google", error);
 }
 
+/** Default whole-analysis budget (Settings can change it, 30 to 270 s). */
+export const ANALYZE_BUDGET_MS = DEFAULT_ANALYSIS_TIMEOUT_SEC * 1000;
+/** One model call (including the SDK's own retry). */
+const MODEL_TIMEOUT_MS = 120_000;
+
+/** Short thinking: Gemini 3+ takes a level, Gemini 2.x a token budget. */
+function thinkingFor(modelId: string) {
+  return /^gemini-2\./.test(modelId) ? { thinkingBudget: 0 } : { thinkingLevel: "low" as const };
+}
+
 const looksLikeVideo = (type: string | null) => !!type && /^video\//.test(type);
 
 export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): ProductAnalyzer {
-  const modelId = options.modelId ?? modelIds().productAnalysis;
+  const defaultModelId = options.modelId ?? modelIds().productAnalysis;
   const now = options.now ?? (() => new Date());
 
   const apiKey = () => {
@@ -163,17 +183,28 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
     }
     return key;
   };
-  let model = options.model;
-  const getModel = () => (model ??= createGoogleGenerativeAI({ apiKey: apiKey() })(modelId));
+  // One model instance per id: the workspace Settings can pick another model.
+  const models = new Map<string, LanguageModel>();
+  const getModel = (modelId: string) => {
+    if (options.model) return options.model;
+    let m = models.get(modelId);
+    if (!m) {
+      m = createGoogleGenerativeAI({ apiKey: apiKey() })(modelId);
+      models.set(modelId, m);
+    }
+    return m;
+  };
 
-  async function run(content: ModelMessage[]) {
+  async function run(content: ModelMessage[], budget: AbortSignal, modelId: string) {
     try {
       const result = await generateText({
-        model: getModel(),
+        model: getModel(modelId),
         system: SYSTEM,
         messages: content,
         output: Output.object({ schema: modelAnalysisSchema, name: "product_analysis" }),
         maxRetries: 1,
+        abortSignal: AbortSignal.any([AbortSignal.timeout(MODEL_TIMEOUT_MS), budget]),
+        providerOptions: { google: { thinkingConfig: thinkingFor(modelId) } },
       });
       return { output: result.output, usage: result.usage };
     } catch (error) {
@@ -194,6 +225,11 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
       // Media and pages go through the brand proxy; Google calls go direct.
       const viaProxy = createHttpClient(callCtx, { fetch: options.fetch });
       const direct = createHttpClient({}, { fetch: options.fetch });
+      // Workspace Settings (CallContext.ai) override the defaults.
+      const modelId = callCtx.ai?.analysisModel ?? defaultModelId;
+      const budget = AbortSignal.timeout(
+        options.budgetMs ?? callCtx.ai?.analysisTimeoutMs ?? ANALYZE_BUDGET_MS,
+      );
 
       let modelOut: z.infer<typeof modelAnalysisSchema>;
       let tokens: { inputTokens?: number; outputTokens?: number };
@@ -204,7 +240,7 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
         try {
           media = await viaProxy(input.mediaUrl, {
             headers: { referer: "https://www.tiktok.com/", "user-agent": "Mozilla/5.0" },
-            signal: AbortSignal.timeout(60_000),
+            signal: AbortSignal.any([AbortSignal.timeout(60_000), budget]),
           });
         } catch (error) {
           throw networkError("tiktok-media", error);
@@ -228,6 +264,7 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
           fetch: direct,
           baseUrl: options.geminiBaseUrl,
           sleep: options.sleep,
+          signal: budget,
         };
         const file = await uploadToGeminiFiles(
           files,
@@ -242,15 +279,23 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
           const caption = input.caption
             ? `TikTok caption: """${input.caption.slice(0, 2000)}"""`
             : "";
-          const res = await run([
-            {
-              role: "user",
-              content: [
-                { type: "file", data: new URL(file.uri), mediaType: file.mimeType ?? "video/mp4" },
-                { type: "text", text: prompt(language, caption, hint) },
-              ],
-            },
-          ]);
+          const res = await run(
+            [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "file",
+                    data: new URL(file.uri),
+                    mediaType: file.mimeType ?? "video/mp4",
+                  },
+                  { type: "text", text: prompt(language, caption, hint) },
+                ],
+              },
+            ],
+            budget,
+            modelId,
+          );
           modelOut = res.output;
           tokens = { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens };
         } finally {
@@ -259,21 +304,25 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
         referenceImageUrl = input.thumbnailUrl ?? null;
       } else {
         const page = await extractPage(viaProxy, input.url);
-        const res = await run([
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: prompt(
-                  language,
-                  `Product page ${input.url}\nbestFrameSec must be null.\n\n<page>\n${page.text}\n</page>`,
-                  hint,
-                ),
-              },
-            ],
-          },
-        ]);
+        const res = await run(
+          [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: prompt(
+                    language,
+                    `Product page ${input.url}\nbestFrameSec must be null.\n\n<page>\n${page.text}\n</page>`,
+                    hint,
+                  ),
+                },
+              ],
+            },
+          ],
+          budget,
+          modelId,
+        );
         modelOut = { ...res.output, bestFrameSec: null };
         tokens = { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens };
         referenceImageUrl = page.imageUrl;

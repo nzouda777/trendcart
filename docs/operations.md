@@ -107,7 +107,8 @@ Every AI call is metered per workspace into `usage_monthly`. Before each call, i
 already spent `AI_MONTHLY_CAP_USD` (default 50, UTC calendar month), the call fails with
 `quota_exceeded` ("Monthly AI budget reached"), and the step shows as failed with a retry button.
 A call already in flight is recorded even if it pushes the total past the cap. `0` blocks all AI
-calls. The cap is global for now; a per-workspace override is an open question.
+calls. Owners can set a per-workspace cap in **Settings** (`/app/settings`); it replaces
+`AI_MONTHLY_CAP_USD` for that workspace. Changes are audited as `settings.update`.
 
 ## Connection failures
 

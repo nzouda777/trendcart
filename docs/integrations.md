@@ -172,6 +172,13 @@ automatically) or reads the product page, and stores only the JSON result.
 2. Default model `gemini-3.8-flash`; override with `AI_ANALYSIS_MODEL`. Defaults and prices are
    in `lib/ai/pricing.ts`.
 3. `AI_MONTHLY_CAP_USD` (default 50) caps AI spend per workspace per month.
+4. Time limit: one analysis (media download, Files API upload and processing, model call) stops
+   after 210 s by default with a retryable error, so the workflow step ends cleanly instead of
+   hitting the Vercel function limit. Thinking is set to `low`.
+
+Workspace owners can override the analysis model, the copywriting model, the monthly AI budget
+and both AI time limits (30 to 270 s) in **Settings** (`/app/settings`, table
+`workspace_settings`). A saved value wins over the env var; an empty field uses it.
 
 ## SerpApi (supplier search, M2)
 
