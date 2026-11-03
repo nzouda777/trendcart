@@ -24,7 +24,10 @@ const csp = [
   "frame-ancestors 'none'",
   "object-src 'none'",
   "base-uri 'self'",
-  "form-action 'self'",
+  // Browsers apply form-action to every redirect after a form submit: the
+  // Shopify connect forms post to /api/shopify/install, which 303s to the
+  // shop's OAuth page (and Shopify may bounce through its admin/login hosts).
+  "form-action 'self' https://*.myshopify.com https://admin.shopify.com https://accounts.shopify.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   ...(isDev ? [] : ["upgrade-insecure-requests"]),

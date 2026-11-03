@@ -246,7 +246,7 @@ applies to edits, so tell reviewers.
 ## Security headers
 
 `next.config.ts` sends on every route: a Content-Security-Policy with `frame-ancestors 'none'`,
-`frame-src 'none'`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`; plus
+`frame-src 'none'`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'` plus the Shopify OAuth hosts (`*.myshopify.com`, `admin.shopify.com`, `accounts.shopify.com`); plus
 `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: strict-origin-when-cross-origin`, a restrictive `Permissions-Policy`,
 `Cross-Origin-Opener-Policy: same-origin`, and in production HSTS (2 years, subdomains) and
