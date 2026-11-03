@@ -29,7 +29,8 @@ import { ac, isRole, parseRole, ROLES, roles } from "./permissions";
 const INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 function baseURL() {
-  return (process.env.BETTER_AUTH_URL ?? siteConfig.url).replace(/\/+$/, "");
+  // `||`, not `??`: an empty BETTER_AUTH_URL= line in .env must fall back too.
+  return (process.env.BETTER_AUTH_URL?.trim() || siteConfig.url).replace(/\/+$/, "");
 }
 
 async function firstWorkspaceId(db: Database, userId: string): Promise<string | null> {
