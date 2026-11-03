@@ -1,4 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "crons": [{ "path": "/api/cron/tiktok-token-refresh", "schedule": "15 * * * *" }]
+  "crons": [{ "path": "/api/cron/tiktok-token-refresh", "schedule": "15 3 * * *" }]
 }
