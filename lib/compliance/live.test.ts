@@ -264,7 +264,7 @@ describe("prompt and model output handling", () => {
 });
 
 describe("mergeRuleResults", () => {
-  const r = (ruleId: string, v: "pass" | "warn" | "fail", reason = v) => ({
+  const r = (ruleId: string, v: "pass" | "warn" | "fail", reason: string = v) => ({
     ruleId,
     kind: "policy" as const,
     verdict: v,
