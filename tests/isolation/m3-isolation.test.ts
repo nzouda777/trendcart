@@ -146,9 +146,10 @@ beforeAll(async () => {
 
   const a = await setupTenant(w.a, "alpha-m3.myshopify.com", "public");
   const b = await setupTenant(w.b, "bravo-m3.myshopify.com", "custom");
-  ids.aAds = a.ads[0]!.id;
+  // B1: campaigns need an ad account in the brand currency (USD).
+  ids.aAds = a.ads.find((x) => x.advertiserId === "7000000000000000002")!.id;
   ids.aProfile = a.profile.id;
-  ids.bAds = b.ads[0]!.id;
+  ids.bAds = b.ads.find((x) => x.advertiserId === "7000000000000000002")!.id;
   ids.bProfile = b.profile.id;
 
   // The same TikTok video in both workspaces: the candidate URLs collide.

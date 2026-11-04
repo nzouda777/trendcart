@@ -72,6 +72,8 @@ let shopifyCalls: ShopifyCall[];
 let adsCalls: AdsCall[];
 let postingCalls: PostingCall[];
 let statusOf: (id: string) => string | undefined;
+/** The USD mock advertiser (the brand is USD; B1 refuses the EUR one). */
+const USD_ADVERTISER = "7000000000000000002";
 let adAccounts: { id: string; advertiserId: string }[] = [];
 let profileId = "";
 let productId = "";
@@ -203,7 +205,8 @@ describe("M3 demo (mock mode)", () => {
         approveVideos(w.a.mediaBuyer, { productId, adConnectionId: crypto.randomUUID() }, deps),
       ),
     ).toMatchObject({ code: "invalid_input" });
-    const account = adAccounts[0]!;
+    // B1: the account must bill in the brand currency (USD): the USD mock advertiser.
+    const account = adAccounts.find((a) => a.advertiserId === USD_ADVERTISER)!;
     const p = await approveVideos(w.a.mediaBuyer, { productId, adConnectionId: account.id }, deps);
     expect(p.status).toBe("ready_to_launch");
     expect(p.gate).toBe("launch");
@@ -313,9 +316,7 @@ describe("M3 demo (mock mode)", () => {
     expect(p.campaign!.statsSyncedAt).not.toBeNull();
     // Every stats call went to the campaign's advertiser.
     const stats = adsCalls.filter((c) => c.method === "getHourlyStats");
-    expect(new Set(stats.map((c) => c.advertiserId))).toEqual(
-      new Set([adAccounts[0]!.advertiserId]),
-    );
+    expect(new Set(stats.map((c) => c.advertiserId))).toEqual(new Set([USD_ADVERTISER]));
   });
 
   it("pause / resume / budget: owner and media buyer only, audited", async () => {
@@ -343,11 +344,18 @@ describe("M3 demo (mock mode)", () => {
           a.action === "campaign.launch" && (a.metadata as { resume?: boolean }).resume === true,
       ),
     ).toBe(true);
-    // Open item (tiktok-integration): no adapter implements updateBudget yet.
+    // updateBudget now exists (N9): amount only, capped at 10x the brand default, audited.
     expect(
-      await failure(updateCampaignBudget(w.a.mediaBuyer, { productId, amount: 45 }, deps)),
-    ).toMatchObject({ code: "precondition_failed" });
-    expect((await pipeline()).campaign!.config.budget.amount).toBe(30);
+      await failure(updateCampaignBudget(w.a.mediaBuyer, { productId, amount: 301 }, deps)),
+    ).toMatchObject({ code: "invalid_input" });
+    await updateCampaignBudget(w.a.mediaBuyer, { productId, amount: 45 }, deps);
+    expect((await pipeline()).campaign!.config.budget.amount).toBe(45);
+    expect(
+      (await audits()).find(
+        (a) => a.action === "campaign.budget_change" && a.targetType === "campaign",
+      )!.metadata,
+    ).toMatchObject({ from: 30, to: 45, currency: "USD" });
+    expect(statusOf(ids.campaignId)).toBe("ENABLE");
   });
 
   it("private TikTok post of the approved video: SELF_ONLY, streamed from Shopify, audited", async () => {

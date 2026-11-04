@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ForbiddenError } from "@/lib/auth/errors";
 import { createLiveComplianceChecker, POLICY_CATEGORIES } from "@/lib/compliance";
 import { reviewPrompt } from "@/lib/compliance/live";
-import { campaign, product } from "@/lib/db/schema";
+import { campaign, product, tiktokAdConnection } from "@/lib/db/schema";
 import { IntegrationError, type Integrations } from "@/lib/domain/contracts";
 import { createIntegrations } from "@/lib/integrations";
 import { createLiveShopifyClient } from "@/lib/integrations/shopify/live";
@@ -33,7 +33,7 @@ import { assertPrivacyAllowed, isPostingAudited } from "@/lib/integrations/tikto
 import { createLiveTikTokPostingClient } from "@/lib/integrations/tiktok-posting/live";
 import { createHttpClient, networkError } from "@/lib/integrations/tiktok-data/http";
 import { assertNoMediaUrl, candidateVideoFields } from "@/lib/media/candidates";
-import { approveVideo, approveVideos, getProductPipeline, type ServiceDeps } from "@/lib/services";
+import { approveVideo, approveVideos, type ServiceDeps } from "@/lib/services";
 import { syncAllCampaignStats } from "@/lib/services/internal/campaign-stats";
 import { listLaunchedCampaigns } from "@/lib/tenant/system";
 import { prepareCampaignStep } from "@/lib/workflows/steps/prepare-campaign";
@@ -575,61 +575,85 @@ describe("M3 services (mock world)", () => {
 
   // SHOULD-FIX S1: a creative (no campaign:create) completes GATE 3 and so
   // creates the paused campaign on the TikTok Ads account it picks.
-  it.fails(
-    "completing GATE 3 (which creates the TikTok campaign) needs campaign:create",
-    async () => {
-      const at3 = await toGate3PageApproved(w.a, link(), deps);
-      const [first] = usableVideos(at3);
-      await approveVideo(w.a.creative, { productId: at3.id, videoId: first!.id }, deps);
-      const error = await failure(
-        approveVideos(w.a.creative, { productId: at3.id, adConnectionId: ads[0]!.id }, deps),
-      );
-      expect(error).toBeInstanceOf(ForbiddenError);
-    },
-  );
+  it("completing GATE 3 (which creates the TikTok campaign) needs campaign:create", async () => {
+    const at3 = await toGate3PageApproved(w.a, link(), deps);
+    const [first] = usableVideos(at3);
+    await approveVideo(w.a.creative, { productId: at3.id, videoId: first!.id }, deps);
+    const error = await failure(
+      approveVideos(w.a.creative, { productId: at3.id, adConnectionId: ads[0]!.id }, deps),
+    );
+    expect(error).toBeInstanceOf(ForbiddenError);
+  });
 
-  // BLOCKING B1: the brand default test budget (brand currency) is sent as is
-  // to an advertiser in another currency, and GATE 4 shows it in the brand
-  // currency. Here the brand is USD and the chosen advertiser bills in EUR.
-  it.fails(
-    "the GATE 4 budget is in the advertiser's currency (or a mismatch is refused)",
-    async () => {
-      const eur = ads.find((a) => a.advertiserId === MOCK_ADVERTISERS[0]!.advertiserId)!;
-      expect(MOCK_ADVERTISERS[0]!.currency).toBe("EUR");
-      const at3 = await toGate3PageApproved(w.a, link(), deps);
-      expect(at3.currency).toBe("USD");
-      const [first] = usableVideos(at3);
-      await approveVideo(w.a.creative, { productId: at3.id, videoId: first!.id }, deps);
-      const refused = await failure(
+  // BLOCKING B1 (user decision: different currencies are supported). The
+  // brand is USD and the chosen advertiser bills in EUR: the GATE 3 approval
+  // needs a human-supplied rate, the budget sent to TikTok is converted, and
+  // an ad account of unknown currency is refused.
+  it("a currency mismatch needs an fxRate and converts the budget; an unknown currency is refused", async () => {
+    const eur = ads.find((a) => a.advertiserId === MOCK_ADVERTISERS[0]!.advertiserId)!;
+    expect(MOCK_ADVERTISERS[0]!.currency).toBe("EUR");
+    const at3 = await toGate3PageApproved(w.a, link(), deps);
+    expect(at3.currency).toBe("USD");
+    const [first] = usableVideos(at3);
+    await approveVideo(w.a.creative, { productId: at3.id, videoId: first!.id }, deps);
+
+    // No rate: refused.
+    expect(
+      await failure(
         approveVideos(w.a.mediaBuyer, { productId: at3.id, adConnectionId: eur.id }, deps),
-      );
-      if (refused) return; // refusing the mismatch is an acceptable fix
-      const p = await getProductPipeline(w.a.viewer, at3.id);
-      expect((p.campaign as unknown as { currency?: string }).currency).toBe("EUR");
-    },
-  );
+      ),
+    ).toMatchObject({ code: "invalid_input" });
+
+    // Unknown currency: refused, rate or not.
+    const unknown = await w.a.owner.db.insert(tiktokAdConnection, {
+      brandId: w.a.brandId,
+      advertiserId: "7000000000000009999",
+      name: "Legacy account",
+      status: "active",
+    });
+    expect(
+      await failure(
+        approveVideos(
+          w.a.mediaBuyer,
+          { productId: at3.id, adConnectionId: unknown.id, fxRate: 0.92 },
+          deps,
+        ),
+      ),
+    ).toMatchObject({ code: "precondition_failed" });
+
+    // With a rate (1 USD = 0.92 EUR): accepted, 30 USD becomes 27.6 EUR.
+    const p = await approveVideos(
+      w.a.mediaBuyer,
+      { productId: at3.id, adConnectionId: eur.id, fxRate: 0.92 },
+      deps,
+    );
+    expect(p.status).toBe("ready_to_launch");
+    expect(p.campaign).toMatchObject({ currency: "EUR", brandCurrency: "USD", fxRate: 0.92 });
+    expect(p.campaign!.config.budget.amount).toBe(27.6);
+    const created = adsCalls.filter(
+      (c) => c.method === "createPausedCampaign" && c.advertiserId === eur.advertiserId,
+    );
+    expect(created.at(-1)!.args[1]).toMatchObject({ budget: { amount: 27.6 } });
+  });
 
   // SHOULD-FIX S4: the stats scan always returns the oldest launched campaigns
   // first, so past STATS_BATCH_SIZE (100) the newest never sync.
-  it.fails(
-    "the stats scan rotates: a campaign synced last time does not starve the others",
-    async () => {
-      await toLaunched(w.a, link(), deps, ads[1]!.id);
-      const all = await listLaunchedCampaigns({ limit: 100 }, w.db);
-      expect(all.length).toBeGreaterThanOrEqual(2);
-      const synced = new Set<string>();
-      for (let run = 0; run < all.length; run++) {
-        await syncAllCampaignStats({
-          scan: async (input) => {
-            const refs = await listLaunchedCampaigns({ ...input, limit: 1 }, w.db);
-            for (const r of refs) synced.add(r.campaignId);
-            return refs;
-          },
-          ads: integrations.tiktokAds,
-          context: (ws) => w.system(ws),
-        });
-      }
-      expect(synced.size).toBe(all.length);
-    },
-  );
+  it("the stats scan rotates: a campaign synced last time does not starve the others", async () => {
+    await toLaunched(w.a, link(), deps, ads[1]!.id);
+    const all = await listLaunchedCampaigns({ limit: 100 }, w.db);
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    const synced = new Set<string>();
+    for (let run = 0; run < all.length; run++) {
+      await syncAllCampaignStats({
+        scan: async (input) => {
+          const refs = await listLaunchedCampaigns({ ...input, limit: 1 }, w.db);
+          for (const r of refs) synced.add(r.campaignId);
+          return refs;
+        },
+        ads: integrations.tiktokAds,
+        context: (ws) => w.system(ws),
+      });
+    }
+    expect(synced.size).toBe(all.length);
+  });
 });
