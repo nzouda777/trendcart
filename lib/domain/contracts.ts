@@ -672,6 +672,8 @@ export interface TikTokPostingClient {
     sourceUrl: string;
     caption: string;
     privacyLevel: TikTokPrivacyLevel;
+    /** Brand proxy for the source reads (HEAD / Range) from the Shopify URL. */
+    proxyUrl?: string;
   }): Promise<{ publishId: string }>;
   getPublishStatus(input: { accessToken: string; publishId: string }): Promise<TikTokPublishStatus>;
 }
