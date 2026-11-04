@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
 import { campaign, shopifyConnection, tiktokProfileConnection } from "@/lib/db/schema";
@@ -82,7 +82,12 @@ export const PAUSED_CAMPAIGN_SYNC_MS = 48 * 60 * 60 * 1000;
 /**
  * Launched campaigns to sync hourly stats for, across workspaces (ids only):
  * every `active` campaign, plus `paused` ones that were launched and changed
- * within the last 48 hours, so their final hours land. Oldest first.
+ * within the last 48 hours, so their final hours land.
+ *
+ * Fair rotation: least recently synced first (`stats_synced_at`, never synced
+ * first), then oldest launch. The sync must stamp each campaign it attempts
+ * with `markCampaignStatsSynced`, success or failure, so a batch smaller than
+ * the backlog still reaches every campaign.
  */
 export async function listLaunchedCampaigns(
   input: { limit: number; now?: Date },
@@ -101,6 +106,27 @@ export async function listLaunchedCampaigns(
         or(eq(c.status, "active"), and(eq(c.status, "paused"), gt(c.updatedAt, since))),
       ),
     )
-    .orderBy(asc(c.launchedAt), asc(c.id))
+    .orderBy(sql`${c.statsSyncedAt} asc nulls first`, asc(c.launchedAt), asc(c.id))
     .limit(limit);
+}
+
+/**
+ * Records a stats sync attempt on a campaign of the context's workspace.
+ * Leaves `updated_at` untouched: it dates the last real change (a pause),
+ * which bounds how long a paused campaign keeps being synced.
+ */
+export async function markCampaignStatsSynced(
+  ctx: WorkspaceContext,
+  campaignId: string,
+  at: Date = new Date(),
+): Promise<void> {
+  await ctx.db.update(
+    campaign,
+    {
+      statsSyncedAt: at,
+      // Explicit value so the $onUpdate default does not bump it.
+      updatedAt: sql`${campaign.updatedAt}` as unknown as Date,
+    },
+    eq(campaign.id, campaignId),
+  );
 }

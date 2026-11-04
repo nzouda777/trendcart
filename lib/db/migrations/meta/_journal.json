@@ -43,6 +43,13 @@
       "when": 1793757771987,
       "tag": "0005_m3_page_template",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793795348514,
+      "tag": "0006_m3_ad_currency_campaign_sync",
+      "breakpoints": true
     }
   ]
 }

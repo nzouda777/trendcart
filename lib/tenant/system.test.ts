@@ -21,6 +21,7 @@ import {
   getSystemContext,
   listDueTikTokProfileConnections,
   listLaunchedCampaigns,
+  markCampaignStatsSynced,
 } from "./system";
 
 let db: Database;
@@ -239,5 +240,65 @@ describe("listLaunchedCampaigns", () => {
     for (const ref of refs) expect(Object.keys(ref).sort()).toEqual(["campaignId", "workspaceId"]);
     expect(await listLaunchedCampaigns({ limit: 1, now }, db)).toHaveLength(1);
     expect(await listLaunchedCampaigns({ limit: 0, now }, db)).toEqual([]);
+  });
+
+  it("orders never synced first, then least recently synced, then oldest launch", async () => {
+    for (const ws of [wsA, wsB]) await createScopedDb(db, ws).delete(campaign, undefined);
+    const launched = (h: number) => new Date(now.getTime() - h * HOUR);
+    const syncedLongAgo = await campaignIn(wsA, { status: "active", launchedAt: launched(50) });
+    const syncedRecently = await campaignIn(wsB, { status: "active", launchedAt: launched(60) });
+    const neverNewer = await campaignIn(wsA, { status: "active", launchedAt: launched(1) });
+    const neverOlder = await campaignIn(wsB, { status: "active", launchedAt: launched(2) });
+    await markCampaignStatsSynced(getSystemContext(wsA, "t", db), syncedLongAgo, launched(3));
+    await markCampaignStatsSynced(getSystemContext(wsB, "t", db), syncedRecently, launched(1));
+
+    const refs = await listLaunchedCampaigns({ limit: 50, now }, db);
+    expect(refs.map((r) => r.campaignId)).toEqual([
+      neverOlder,
+      neverNewer,
+      syncedLongAgo,
+      syncedRecently,
+    ]);
+  });
+
+  it("rotates through every campaign when the batch is smaller than the backlog", async () => {
+    for (const ws of [wsA, wsB]) await createScopedDb(db, ws).delete(campaign, undefined);
+    const all = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      all.add(
+        await campaignIn(i % 2 ? wsA : wsB, {
+          status: "active",
+          launchedAt: new Date(now.getTime() - (10 - i) * HOUR),
+        }),
+      );
+    }
+    const seen = new Set<string>();
+    for (let run = 0; run < 3; run++) {
+      const at = new Date(now.getTime() + run * HOUR);
+      for (const ref of await listLaunchedCampaigns({ limit: 2, now: at }, db)) {
+        seen.add(ref.campaignId);
+        await markCampaignStatsSynced(getSystemContext(ref.workspaceId, "t", db), ref.campaignId, at);
+      }
+    }
+    expect(seen).toEqual(all);
+  });
+
+  it("markCampaignStatsSynced keeps updated_at and stays in its workspace", async () => {
+    const pausedAt = new Date(now.getTime() - 2 * HOUR);
+    const id = await campaignIn(wsA, {
+      status: "paused",
+      launchedAt: new Date(now.getTime() - 10 * HOUR),
+      updatedAt: pausedAt,
+    });
+    const syncedAt = new Date(now.getTime() - HOUR);
+    // Another workspace cannot stamp it.
+    await markCampaignStatsSynced(getSystemContext(wsB, "t", db), id, syncedAt);
+    expect((await createScopedDb(db, wsA).getById(campaign, id)).statsSyncedAt).toBeNull();
+
+    await markCampaignStatsSynced(getSystemContext(wsA, "t", db), id, syncedAt);
+    const row = await createScopedDb(db, wsA).getById(campaign, id);
+    expect(row.statsSyncedAt).toEqual(syncedAt);
+    // The 48 h paused window still counts from the pause, not from the sync.
+    expect(row.updatedAt).toEqual(pausedAt);
   });
 });

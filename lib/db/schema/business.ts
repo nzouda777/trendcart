@@ -11,8 +11,10 @@
  * Secrets live in `*_enc` columns as lib/crypto envelopes (the envelope carries
  * the key version used, for rotation).
  */
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   foreignKey,
   index,
   integer,
@@ -274,6 +276,13 @@ export const tiktokAdConnection = pgTable(
     brandId: text("brand_id").notNull(),
     advertiserId: text("advertiser_id").notNull(),
     name: text("name").notNull(),
+    /**
+     * Advertiser billing currency (ISO 4217, upper case), as TikTok reports it.
+     * Budgets are read by TikTok in this currency. Null = unknown (rows from
+     * before it was stored): services must refuse the account until it is
+     * reconnected or refreshed.
+     */
+    currency: text("currency"),
     accessTokenEnc: text("access_token_enc"),
     status: connectionStatusEnum("status").notNull().default("pending"),
     createdAt: createdAt(),
@@ -281,6 +290,7 @@ export const tiktokAdConnection = pgTable(
   },
   (t) => [
     index("tiktok_ad_connection_workspace_idx").on(t.workspaceId),
+    check("tiktok_ad_connection_currency_chk", sql`${t.currency} ~ '^[A-Z]{3}$'`),
     unique("tiktok_ad_connection_workspace_id_uq").on(t.workspaceId, t.id),
     uniqueIndex("tiktok_ad_connection_advertiser_uidx").on(t.workspaceId, t.advertiserId),
     sameWorkspaceFk(
@@ -485,12 +495,24 @@ export const campaign = pgTable(
     config: jsonb("config").$type<CampaignSpec>().notNull(),
     status: campaignStatusEnum("status").notNull().default("draft"),
     launchedAt: tz("launched_at"),
+    /**
+     * Last hourly stats sync attempt (success or failure). The cross-workspace
+     * scan picks the least recently synced first (null = never), so no
+     * campaign starves past the batch size.
+     */
+    statsSyncedAt: tz("stats_synced_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("campaign_workspace_idx").on(t.workspaceId),
     index("campaign_product_idx").on(t.workspaceId, t.productId),
+    /** One campaign per (product, ad account): the prepare step's crash-safety net. */
+    uniqueIndex("campaign_product_ad_connection_uidx").on(
+      t.workspaceId,
+      t.productId,
+      t.adConnectionId,
+    ),
     unique("campaign_workspace_id_uq").on(t.workspaceId, t.id),
     sameWorkspaceFk(
       "campaign_product_fk",
