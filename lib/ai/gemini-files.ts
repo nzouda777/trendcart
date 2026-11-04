@@ -191,22 +191,50 @@ export async function uploadToGeminiFiles(
     );
   }
 
-  let file = parsed.data.file;
+  const name = parsed.data.file.name;
+  try {
+    return await waitUntilActive(config, base, sleep, parsed.data.file);
+  } catch (error) {
+    // The file exists from here on: whatever ends the wait (FAILED, timeout,
+    // budget abort, poll error, bad response), delete it before rethrowing.
+    // On success the caller deletes it after use.
+    await deleteGeminiFile(config, name);
+    throw error;
+  }
+}
+
+const polledFileSchema = fileSchema.partial({ uri: true });
+
+async function waitUntilActive(
+  config: GeminiFilesConfig,
+  base: string,
+  sleep: (ms: number) => Promise<void>,
+  uploaded: GeminiFile,
+): Promise<GeminiFile> {
+  let file = uploaded;
   const deadline = Date.now() + (config.pollTimeoutMs ?? 90_000);
   while (file.state === "PROCESSING" || file.state === "STATE_UNSPECIFIED") {
-    if (Date.now() > deadline || config.signal?.aborted) {
-      await deleteGeminiFile(config, file.name);
-      throw tooSlow();
-    }
+    if (Date.now() > deadline || config.signal?.aborted) throw tooSlow();
     await sleep(config.pollIntervalMs ?? 2_000);
     const res = await call(() =>
-      config.fetch(`${base}/v1beta/${file.name}`, {
+      config.fetch(`${base}/v1beta/${uploaded.name}`, {
         headers: { "x-goog-api-key": config.apiKey },
         signal: withBudget(15_000, config.signal),
       }),
     );
     if (!res.ok) return fail(res);
-    file = fileSchema.parse(await res.json());
+    const polled = polledFileSchema.safeParse(await res.json().catch(() => null));
+    if (!polled.success) {
+      throw new IntegrationError(
+        PROVIDER,
+        "provider_error",
+        "Unexpected Gemini Files API response.",
+        {
+          cause: polled.error,
+        },
+      );
+    }
+    file = { ...polled.data, name: uploaded.name, uri: polled.data.uri ?? uploaded.uri };
   }
   if (file.state === "FAILED") {
     throw new IntegrationError(

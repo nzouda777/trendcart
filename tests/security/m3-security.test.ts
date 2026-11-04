@@ -390,10 +390,10 @@ describe("compliance prompt injection", () => {
     expect(data.overall).not.toBe("pass");
   });
 
-  // SHOULD-FIX S3: a model that rates no category (or only some, e.g. after a
-  // prompt injection in the caption or the video) leaves the report "pass",
-  // with only a note in policy.ai_review.
-  it.fails("a policy review that rates no category is not a pass", async () => {
+  // S3 (fixed): a model that rates no category (or only some, e.g. after a
+  // prompt injection in the caption or the video) must not leave the report
+  // "pass": unrated categories fail closed.
+  it("a policy review that rates no category is not a pass", async () => {
     const checker = createLiveComplianceChecker({
       apiKey: "k",
       model: modelReturning({ rules: [] }),

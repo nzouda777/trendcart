@@ -458,6 +458,15 @@ export interface ShopifyClient {
     creds: ShopifyCredentials,
     input: { suffix: string; template: Record<string, unknown> },
   ): Promise<void>;
+  /**
+   * Deletes templates/product.<suffix>.json from the live theme (themeFilesDelete,
+   * same scope as upsertProductTemplate). Only "tc-" suffixes; refused when
+   * `productId` is ACTIVE and still uses it. Idempotent (deleted: false when gone).
+   */
+  deleteProductTemplate(
+    creds: ShopifyCredentials,
+    input: { suffix: string; productId?: string },
+  ): Promise<{ deleted: boolean }>;
   /** Idempotent: creates custom.highlights, custom.faq and custom.guarantee if missing. */
   ensureMetafieldDefinitions(creds: ShopifyCredentials): Promise<void>;
 
