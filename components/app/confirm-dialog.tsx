@@ -29,6 +29,7 @@ export function ConfirmDialog({
   onConfirm,
   onSuccess,
   errorAction,
+  confirmDisabled = false,
   children,
 }: {
   trigger: ReactNode;
@@ -40,6 +41,8 @@ export function ConfirmDialog({
   onConfirm: () => Promise<ActionResult<unknown>>;
   onSuccess?: () => void;
   errorAction?: (failure: ServiceFailure, close: () => void) => ReactNode;
+  /** Keeps the confirm button disabled (e.g. until a required choice is made). */
+  confirmDisabled?: boolean;
   /** Extra content (inputs) between the description and the buttons. */
   children?: ReactNode;
 }) {
@@ -99,7 +102,7 @@ export function ConfirmDialog({
                 variant={destructive ? "destructive" : "default"}
                 size="lg"
                 onClick={confirm}
-                disabled={pending}
+                disabled={pending || confirmDisabled}
                 aria-busy={pending}
               >
                 {pending ? pendingLabel : confirmLabel}

@@ -35,8 +35,8 @@ const PART_LABEL: Record<GatePart, string> = { page: "Page", videos: "Videos" };
 
 function waitingDetail(
   gate: Gate,
-  approval: ApprovalDTO | undefined,
   parts: Record<GatePart, GatePartState> | undefined,
+  launching: boolean,
 ): string {
   const who = whoApproves(gate);
   if (gate === "content_approval" && parts) {
@@ -51,8 +51,9 @@ function waitingDetail(
     }
     return `Waiting for: ${who}`;
   }
-  // GATE 4 stays in ready_to_launch while the launch step runs after approval.
-  if (gate === "launch" && approval) return "Approved, launching";
+  // GATE 4 stays in ready_to_launch while the launch step runs after approval
+  // (an older approval of a failed launch does not count: it needs a new one).
+  if (gate === "launch" && launching) return "Approved, launching on TikTok";
   return `Waiting for: ${who}`;
 }
 
@@ -65,12 +66,15 @@ export function GateTracker({
   failedStep,
   approvals,
   contentParts,
+  launching = false,
 }: {
   status: ProductStatus;
   failedStep: ProductStep | null;
   approvals: ApprovalDTO[];
   /** GATE 3 parts (page, videos), approved separately. */
   contentParts?: Record<GatePart, GatePartState>;
+  /** A GATE 4 launch is in flight (launchClaim). */
+  launching?: boolean;
 }) {
   return (
     <ol className="grid gap-3 md:grid-cols-4" aria-label="Approval gates">
@@ -88,7 +92,7 @@ export function GateTracker({
         const failedLabel = failedStep ? STEP_LABELS[failedStep] : stepLabel;
         const detail: Record<GateState, string> = {
           done: approval ? "Approved" : "Passed",
-          waiting: waitingDetail(gate, approval, contentParts),
+          waiting: waitingDetail(gate, contentParts, launching),
           working: `Trendcart is working: ${stepLabel}`,
           failed: `${failedLabel} failed. Retry below.`,
           upcoming: "Not started",

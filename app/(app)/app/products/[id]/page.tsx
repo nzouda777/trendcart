@@ -24,9 +24,24 @@ import {
 import { GateTracker } from "@/components/app/product/gate-tracker";
 import { DeleteProductButton, StepBackButton } from "@/components/app/product/product-actions";
 import { PageReview } from "@/components/app/product/page-review";
+import {
+  ChangeBudgetButton,
+  LaunchCampaignButton,
+  PauseResumeButton,
+} from "@/components/app/product/campaign-controls";
+import {
+  budgetCeiling,
+  budgetLabel,
+  CampaignStats,
+  CampaignStatusPill,
+  CampaignSummary,
+  campaignCounts,
+} from "@/components/app/product/campaign-view";
 import { PageTemplatePanel } from "@/components/app/product/page-template-panel";
 import { pagePartState } from "@/components/app/product/page-state";
+import { RefreshPostsButton } from "@/components/app/product/post-dialog";
 import { SupplierChoice } from "@/components/app/product/supplier-choice";
+import { VideoReview } from "@/components/app/product/video-review";
 import { STEP_LABELS, whoApproves } from "@/components/app/product-status";
 import { ProductThumb } from "@/components/app/product-thumb";
 import { DetailList, Notice, PageSkeleton, Section, Skeleton } from "@/components/app/surface";
@@ -40,7 +55,13 @@ import {
   stepForStatus,
 } from "@/lib/domain/state-machine";
 import { getProductPipeline, quoteSupplierChoice, toServiceFailure } from "@/lib/services";
-import type { ProductPipelineDTO, SupplierDTO, SupplierQuoteDTO } from "@/lib/services/types";
+import type {
+  CampaignDTO,
+  GatePartState,
+  ProductPipelineDTO,
+  SupplierDTO,
+  SupplierQuoteDTO,
+} from "@/lib/services/types";
 import type { UserWorkspaceContext } from "@/lib/tenant/context";
 
 import { getPageContext } from "../../_lib/page-context";
@@ -60,6 +81,20 @@ import {
   stepBackAction,
   updatePageCopyAction,
 } from "./actions";
+import {
+  launchCampaignAction,
+  pauseCampaignAction,
+  resumeCampaignAction,
+  updateCampaignBudgetAction,
+} from "./campaign-actions";
+import {
+  addVideoAction,
+  approveVideoAction,
+  approveVideosAction,
+  publishToProfileAction,
+  refreshTikTokPostsAction,
+  rejectVideoAction,
+} from "./video-actions";
 
 export const metadata: Metadata = { title: "Product" };
 
@@ -181,8 +216,12 @@ async function ProductDetail({ params, searchParams }: Props) {
     <>
       {/* Also poll while the approved page is being published on Shopify
           (slower once the publish looks stuck: it may still finish). */}
-      {(running && !stalled) || pagePartState(product.contentParts) === "publishing" ? (
-        <AutoRefresh intervalMs={product.pagePublishClaim?.stale ? 30_000 : 5000} />
+      {(running && !stalled) ||
+      pagePartState(product.contentParts) === "publishing" ||
+      product.launchClaim ? (
+        <AutoRefresh
+          intervalMs={product.pagePublishClaim?.stale || product.launchClaim?.stale ? 30_000 : 5000}
+        />
       ) : null}
 
       <PageHeader
@@ -242,20 +281,31 @@ async function ProductDetail({ params, searchParams }: Props) {
           failedStep={product.failedStep}
           approvals={product.approvals}
           contentParts={product.contentParts}
+          launching={!!product.launchClaim}
         />
       </Section>
 
       {product.status === "failed" ? (
         <Notice
           tone="danger"
-          title={`${product.failedStep ? STEP_LABELS[product.failedStep] : "A step"} failed`}
+          title={
+            product.failedStep === "launch"
+              ? "The launch failed"
+              : `${product.failedStep ? STEP_LABELS[product.failedStep] : "A step"} failed`
+          }
           action={
             canRetry ? (
-              <RetryButton label="Retry step" onRetry={retryStepAction.bind(null, product.id)} />
+              <RetryButton
+                label={product.failedStep === "launch" ? "Back to Ready to launch" : "Retry step"}
+                onRetry={retryStepAction.bind(null, product.id)}
+              />
             ) : undefined
           }
         >
           {product.error ?? "No error message was recorded."}
+          {product.failedStep === "launch"
+            ? " Trendcart paused the campaign again on TikTok. Going back to Ready to launch needs a new launch approval."
+            : null}
           {!canRetry ? " Ask a Creative or higher to retry." : null}
         </Notice>
       ) : null}
@@ -288,6 +338,35 @@ async function ProductDetail({ params, searchParams }: Props) {
 
       {product.status === "awaiting_content_approval" ? (
         <GateThree product={product} role={role} />
+      ) : null}
+
+      {product.status === "ready_to_launch" ? <GateFour product={product} role={role} /> : null}
+
+      {product.status === "launched" && product.campaign ? (
+        <CampaignResults product={product} campaign={product.campaign} role={role} />
+      ) : null}
+
+      {product.status === "preparing_campaign" ? (
+        <Section
+          id="campaign"
+          title="Campaign"
+          description="Uploading the approved videos to TikTok Ads and creating the campaign, ad groups and ads, all paused."
+        >
+          <div className="grid gap-3" aria-busy="true">
+            <span className="sr-only">Preparing the paused campaign…</span>
+            <Skeleton className="h-5 w-1/3" />
+            <Skeleton className="h-4 w-1/2" />
+            <Skeleton className="h-24 rounded-xl" />
+          </div>
+        </Section>
+      ) : null}
+
+      {product.status === "failed" &&
+      (product.failedStep === "launch" || product.failedStep === "prepare_campaign") &&
+      product.campaign ? (
+        <Section id="campaign" title="Campaign" description="Nothing is spending.">
+          <CampaignSummary campaign={product.campaign} currency={product.currency} />
+        </Section>
       ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -377,6 +456,18 @@ async function ProductDetail({ params, searchParams }: Props) {
         </Section>
       ) : null}
 
+      {product.status !== "awaiting_content_approval" &&
+      (reached(product, "building_page_and_videos") || product.videos.length > 0) ? (
+        <Section
+          id="videos"
+          title="Videos"
+          description="Approved videos are on the Shopify product and used in the campaign. Post them to your TikTok profiles."
+          actions={postsRefresh(product, role)}
+        >
+          <VideoLibrary product={product} role={role} open={false} />
+        </Section>
+      ) : null}
+
       <Section id="activity" title="Activity">
         <Activity product={product} />
       </Section>
@@ -390,7 +481,8 @@ const RUNNING_HINT: Record<string, string> = {
     "Searching online listings with images, prices and shipping, then computing margins. This screen updates on its own.",
   build:
     "Writing the product page and creating it as a draft on the Shopify store. Nothing is published. This screen updates on its own.",
-  prepare_campaign: "Preparing the campaign. This screen updates on its own.",
+  prepare_campaign:
+    "Uploading the approved videos to TikTok Ads and creating the campaign, ad groups and ads, all paused. Nothing spends. This screen updates on its own.",
 };
 
 function BulletList({ title, items }: { title: string; items: string[] }) {
@@ -501,7 +593,62 @@ function pricesOf(product: ProductPipelineDTO) {
   };
 }
 
+const PART_STATE: Record<
+  GatePartState,
+  { label: string; tone: "action" | "running" | "success" | "danger" }
+> = {
+  pending: { label: "Waiting for review", tone: "action" },
+  publishing: { label: "Publishing", tone: "running" },
+  approved: { label: "Approved", tone: "success" },
+  rejected: { label: "Rejected, being rebuilt", tone: "danger" },
+};
+
 function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role }) {
+  const pagePart = pagePartState(product.contentParts);
+  const videosPart = product.contentParts.videos;
+  const parts = [
+    ["Page", pagePart],
+    ["Videos", videosPart],
+  ] as const;
+  return (
+    <Section
+      id="gate-3"
+      title="Gate 3: approve the page and the videos"
+      description="Both parts need an approval. Then Trendcart prepares the TikTok campaign, paused: nothing spends before Gate 4."
+      className="border-warning/40"
+    >
+      <dl className="mb-5 flex flex-wrap gap-x-6 gap-y-2 text-sm">
+        {parts.map(([label, state]) => (
+          <div key={label} className="flex items-center gap-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd>
+              <Pill tone={PART_STATE[state].tone}>{PART_STATE[state].label}</Pill>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="grid gap-6">
+        <GateThreePage product={product} role={role} />
+        <Section
+          as="h3"
+          id="gate-3-videos"
+          title={videosPart === "approved" ? "Videos approved" : "Videos"}
+          description={
+            videosPart === "approved"
+              ? "The approved videos are on the Shopify product and will be used in the campaign."
+              : "Approve the videos to use in the ads. Each approved video is uploaded to the Shopify product; videos that break TikTok ad rules cannot be used."
+          }
+          actions={postsRefresh(product, role)}
+          className="bg-background/40"
+        >
+          <VideoLibrary product={product} role={role} open={videosPart !== "approved"} />
+        </Section>
+      </div>
+    </Section>
+  );
+}
+
+function GateThreePage({ product, role }: { product: ProductPipelineDTO; role: Role }) {
   const pagePart = pagePartState(product.contentParts);
   const pageApproved = pagePart === "approved";
   const publishing = pagePart === "publishing";
@@ -513,17 +660,12 @@ function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role 
     product.shopifyStores.find((s) => s.id === product.supplierChoice?.shopifyConnectionId) ?? null;
   return (
     <Section
-      id="gate-3"
-      title={
-        pageApproved
-          ? "Gate 3: page published"
-          : publishing
-            ? "Gate 3: publishing the page"
-            : "Gate 3: review the product page"
-      }
+      as="h3"
+      id="gate-3-page"
+      title={pageApproved ? "Page published" : publishing ? "Publishing the page" : "Product page"}
       description={
         pageApproved ? (
-          "The page is approved and live on the store. Gate 3 also needs the videos approval before the campaign is prepared; video review is not available yet."
+          "The page is approved and live on the store."
         ) : publishing ? (
           "The page was approved. Trendcart is publishing it on the store; if Shopify fails, it goes back to draft and the review reopens."
         ) : (
@@ -533,7 +675,7 @@ function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role 
           </>
         )
       }
-      className={pageApproved ? undefined : "border-warning/40"}
+      className="bg-background/40"
     >
       {product.pageTemplate && templateStore ? (
         <PageTemplatePanel
@@ -575,6 +717,214 @@ function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role 
           ) : null}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** "Refresh post status" while a post of this product is still on its way to TikTok. */
+function postsRefresh(product: ProductPipelineDTO, role: Role) {
+  const processing = product.videos.some((v) =>
+    v.posts.some((p) => p.status === "processing" || p.status === "pending"),
+  );
+  if (!processing || !can(role, "video:publish")) return undefined;
+  return <RefreshPostsButton onRefresh={refreshTikTokPostsAction.bind(null, product.id)} />;
+}
+
+function VideoLibrary({
+  product,
+  role,
+  open,
+}: {
+  product: ProductPipelineDTO;
+  role: Role;
+  open: boolean;
+}) {
+  return (
+    <VideoReview
+      videos={product.videos}
+      open={open && product.status === "awaiting_content_approval"}
+      checking={product.status === "building_page_and_videos"}
+      pagePart={product.contentParts.page}
+      videosPart={product.contentParts.videos}
+      canReview={can(role, "gate:content_approval") && can(role, "video:approve")}
+      canPublish={can(role, "video:publish")}
+      approverLabel={whoApproves("content_approval")}
+      adAccounts={product.adAccounts}
+      chosenAdConnectionId={product.videosChoice?.adConnectionId ?? null}
+      profiles={product.tiktokProfiles}
+      postingAudited={product.postingAudited}
+      defaultCaption={product.pageCopy?.adTexts[0] ?? product.name ?? ""}
+      onApprove={approveVideoAction.bind(null, product.id)}
+      onReject={rejectVideoAction.bind(null, product.id)}
+      onAdd={addVideoAction.bind(null, product.id)}
+      onApproveVideos={approveVideosAction.bind(null, product.id)}
+      onPublish={publishToProfileAction}
+    />
+  );
+}
+
+/* GATE 4 and the launched campaign ------------------------------------------- */
+
+function advertiserOf(campaign: CampaignDTO): string {
+  if (!campaign.advertiserName) return "the TikTok Ads account";
+  return campaign.advertiserId
+    ? `${campaign.advertiserName} (${campaign.advertiserId})`
+    : campaign.advertiserName;
+}
+
+/** "per day, to each ad group". */
+function budgetLevel(campaign: CampaignDTO): string {
+  const b = campaign.config.budget;
+  return `${b.mode === "daily" ? "per day" : "in total"}, ${b.level === "ad_group" ? "to each ad group" : "to the campaign"}`;
+}
+
+function GateFour({ product, role }: { product: ProductPipelineDTO; role: Role }) {
+  const campaign = product.campaign;
+  const claim = product.launchClaim;
+  const inFlight = !!claim && !claim.stale;
+  const canLaunch = can(role, "gate:launch") && can(role, "campaign:launch");
+  const launchable =
+    !!campaign && campaign.status === "paused" && !!campaign.tiktokIds && !campaign.launchedAt;
+  const counts = campaign ? campaignCounts(campaign.config) : null;
+  return (
+    <Section
+      id="gate-4"
+      title={inFlight ? "Gate 4: launching" : "Gate 4: ready to launch"}
+      description={
+        <>
+          The campaign is created on TikTok Ads and{" "}
+          <strong className="text-foreground">paused</strong>. Nothing spends until an owner or a
+          media buyer approves the launch.
+        </>
+      }
+      className="border-warning/40"
+      actions={campaign ? <CampaignStatusPill status={campaign.status} /> : undefined}
+    >
+      {!campaign || !counts ? (
+        <p className="text-sm text-muted-foreground">
+          No campaign is stored for this product, so there is nothing to launch.
+        </p>
+      ) : (
+        <div className="grid gap-5">
+          <CampaignSummary campaign={campaign} currency={product.currency} />
+          {inFlight ? (
+            <Notice tone="info" title="Launching on TikTok…">
+              The launch was approved{" "}
+              <time dateTime={claim.startedAt} title={formatDateTime(claim.startedAt)}>
+                {sinceNow(claim.startedAt)}
+              </time>
+              . This screen updates on its own.
+            </Notice>
+          ) : null}
+          {claim?.stale ? (
+            <Notice tone="warning" title="The launch did not finish">
+              It started{" "}
+              <time dateTime={claim.startedAt} title={formatDateTime(claim.startedAt)}>
+                {sinceNow(claim.startedAt)}
+              </time>{" "}
+              and never completed. Check the campaign in TikTok Ads Manager, then retry the launch.
+            </Notice>
+          ) : null}
+          {!launchable && !claim ? (
+            <Notice tone="warning" title="This campaign cannot be launched">
+              It is not paused on TikTok, or it was not fully created. Nothing is spending.
+            </Notice>
+          ) : null}
+          {launchable && !inFlight ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:flex-wrap sm:items-center">
+              <LaunchCampaignButton
+                advertiser={advertiserOf(campaign)}
+                budget={budgetLabel(campaign.config, product.currency)}
+                ceiling={budgetCeiling(campaign.config, product.currency)}
+                countries={counts.countries.join(", ")}
+                adGroups={counts.adGroups}
+                ads={counts.ads}
+                retry={!!claim?.stale}
+                canLaunch={canLaunch}
+                approverLabel={whoApproves("launch")}
+                onLaunch={launchCampaignAction.bind(null, product.id)}
+              />
+              <ChangeBudgetButton
+                amount={campaign.config.budget.amount}
+                currency={product.currency}
+                levelLabel={budgetLevel(campaign)}
+                canChange={can(role, "campaign:budget")}
+                onChange={updateCampaignBudgetAction.bind(null, product.id)}
+              />
+            </div>
+          ) : null}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function CampaignResults({
+  product,
+  campaign,
+  role,
+}: {
+  product: ProductPipelineDTO;
+  campaign: CampaignDTO;
+  role: Role;
+}) {
+  const live = campaign.status === "active" || campaign.status === "paused";
+  return (
+    <Section
+      id="campaign"
+      title="Campaign results"
+      description={
+        <>
+          {campaign.status === "active"
+            ? "Live and spending"
+            : campaign.status === "paused"
+              ? "Paused, not spending"
+              : "Not running"}{" "}
+          on {advertiserOf(campaign)}
+          {campaign.launchedAt ? `, launched ${formatDateTime(campaign.launchedAt)}` : ""}. Totals
+          cover the last 72 hours.
+        </>
+      }
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <CampaignStatusPill status={campaign.status} />
+          {live ? (
+            <PauseResumeButton
+              status={campaign.status === "active" ? "active" : "paused"}
+              advertiser={advertiserOf(campaign)}
+              canPause={can(role, "campaign:pause")}
+              canResume={can(role, "campaign:launch")}
+              onPause={pauseCampaignAction.bind(null, product.id)}
+              onResume={resumeCampaignAction.bind(null, product.id)}
+            />
+          ) : null}
+          {live ? (
+            <ChangeBudgetButton
+              amount={campaign.config.budget.amount}
+              currency={product.currency}
+              levelLabel={budgetLevel(campaign)}
+              canChange={can(role, "campaign:budget")}
+              onChange={updateCampaignBudgetAction.bind(null, product.id)}
+            />
+          ) : null}
+        </div>
+      }
+    >
+      <div className="grid gap-6">
+        <CampaignStats
+          campaign={campaign}
+          currency={product.currency}
+          syncedLabel={campaign.statsSyncedAt ? sinceNow(campaign.statsSyncedAt) : null}
+        />
+        <details className="rounded-xl border border-border">
+          <summary className="cursor-pointer rounded-xl px-3 py-2 text-sm outline-none select-none hover:bg-surface-2 focus-visible:ring-3 focus-visible:ring-ring/50">
+            Campaign setup: {budgetLabel(campaign.config, product.currency)}
+          </summary>
+          <div className="border-t border-border p-3">
+            <CampaignSummary campaign={campaign} currency={product.currency} />
+          </div>
+        </details>
+      </div>
     </Section>
   );
 }
