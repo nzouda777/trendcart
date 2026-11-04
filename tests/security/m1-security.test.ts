@@ -275,6 +275,8 @@ describe("role checks on every exported service", () => {
       "getProductPipeline",
       "listSuppliers",
       "quoteSupplierChoice",
+      // Workspace settings are readable by every member (AI models and caps).
+      "getWorkspaceSettings",
     ]);
     // Usage is media buyer+ (cost data), so viewers are refused there too.
     for (const [name, fn] of fns.filter(([n]) => !reads.has(n))) {
