@@ -236,3 +236,38 @@ describe("mock Shopify client: contract conformance", () => {
     await expect(client.publishProduct(creds, "123")).rejects.toMatchObject({ code: "not_found" });
   });
 });
+
+describe("mock deleteProductTemplate (QA N6)", () => {
+  it("deletes only generated templates, idempotently, and never one a live product uses", async () => {
+    const client = mock();
+    const suffix = "tc-prod_123";
+    await client.upsertProductTemplate(creds, { suffix, template: { sections: {}, order: [] } });
+    await expect(client.deleteProductTemplate(creds, { suffix })).resolves.toEqual({
+      deleted: true,
+    });
+    await expect(client.deleteProductTemplate(creds, { suffix })).resolves.toEqual({
+      deleted: false,
+    });
+    for (const bad of ["trendcart", "default", "tc-../x", "tc-a.liquid"]) {
+      await expect(client.deleteProductTemplate(creds, { suffix: bad })).rejects.toMatchObject({
+        code: "invalid_input",
+      });
+    }
+
+    await client.upsertProductTemplate(creds, { suffix, template: {} });
+    const product = await client.createDraftProduct(creds, {
+      ...draft,
+      templateSuffix: suffix,
+      idempotencyKey: "prod_123",
+    });
+    // Published with it: refused. Back to draft: allowed.
+    await client.publishProduct(creds, product.productId);
+    await expect(
+      client.deleteProductTemplate(creds, { suffix, productId: product.productId }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await client.unpublishProduct(creds, product.productId);
+    await expect(
+      client.deleteProductTemplate(creds, { suffix, productId: product.productId }),
+    ).resolves.toEqual({ deleted: true });
+  });
+});

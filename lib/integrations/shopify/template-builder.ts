@@ -245,13 +245,39 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Whole Liquid output/tag spans, whitespace-control variants included. */
+const LIQUID_SPAN = /\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g;
+/** Generous bound on what is cleaned before the per-type length cap applies. */
+const MAX_RAW_TEXT = 8000;
+
+/**
+ * Plain text with no Liquid syntax left (QA N5). JSON templates resolve
+ * "{{ ... }}" in setting values as dynamic sources, so AI-written copy (which
+ * may carry prompt-injected listing text) must never keep a delimiter. Text is
+ * first normalised by plainText (tags, entities, control and zero-width
+ * characters removed, so "{​{" or "{<b></b>{" cannot hide a delimiter),
+ * then whole `{{ }}` / `{% %}` spans (including `{{-`/`-}}`, `{%-`/`-%}`) are
+ * removed, then every remaining brace: a delimiter cannot be rebuilt from
+ * what is left (e.g. "{{{%x%}}}" or an unterminated "{{"). Marketing copy
+ * never needs braces.
+ */
+export function liquidSafeText(value: string, max: number, multiline = false): string {
+  const plain = plainText(value.slice(0, MAX_RAW_TEXT), MAX_RAW_TEXT, multiline);
+  let text = plain;
+  for (let previous = ""; previous !== text; ) {
+    previous = text;
+    text = text.replace(LIQUID_SPAN, " ");
+  }
+  return plainText(text.replace(/[{}]/g, ""), max, multiline);
+}
+
 /** Rich text from plain paragraphs; lines starting with "- " become a list. */
 function richText(value: string): string {
   const parts: string[] = [];
   for (const para of value.split(/\n\s*\n/)) {
     const lines = para
       .split("\n")
-      .map((l) => plainText(l, 600))
+      .map((l) => liquidSafeText(l, 600))
       .filter(Boolean);
     if (lines.length === 0) continue;
     if (lines.every((l) => /^[-•*]\s+/.test(l))) {
@@ -285,11 +311,11 @@ export function settingValue(
   const value = raw.trim();
   switch (spec.type) {
     case "text":
-      return plainText(value.replace(/\s*\n\s*/g, " "), 250) || undefined;
+      return liquidSafeText(value.replace(/\s*\n\s*/g, " "), 250) || undefined;
     case "inline_richtext":
-      return escapeHtml(plainText(value.replace(/\s*\n\s*/g, " "), 400)) || undefined;
+      return escapeHtml(liquidSafeText(value.replace(/\s*\n\s*/g, " "), 400)) || undefined;
     case "textarea":
-      return plainText(value, 1500, true) || undefined;
+      return liquidSafeText(value, 1500, true) || undefined;
     case "richtext":
       return richText(value) || undefined;
     case "select":

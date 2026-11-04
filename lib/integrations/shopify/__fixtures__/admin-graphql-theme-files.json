@@ -1,0 +1,83 @@
+{
+  "_note": "Admin GraphQL 2026-10 response bodies for generated-template cleanup (themes MAIN, themeFilesDelete, product templateSuffix), shaped from the 2026-10 schema (themeFilesDelete: deletedThemeFiles + OnlineStoreThemeFilesUserErrors with code). Replayed by live.templates.test.ts; no network.",
+  "mainTheme": {
+    "data": { "themes": { "nodes": [{ "id": "gid://shopify/OnlineStoreTheme/529529152" }] } }
+  },
+  "noMainTheme": {
+    "data": { "themes": { "nodes": [] } }
+  },
+  "deleted": {
+    "data": {
+      "themeFilesDelete": {
+        "deletedThemeFiles": [{ "filename": "templates/product.tc-prod_123.json" }],
+        "userErrors": []
+      }
+    }
+  },
+  "alreadyGone": {
+    "data": {
+      "themeFilesDelete": {
+        "deletedThemeFiles": [],
+        "userErrors": [
+          {
+            "field": ["files", "0"],
+            "message": "The file templates/product.tc-prod_123.json could not be found.",
+            "code": "NOT_FOUND"
+          }
+        ]
+      }
+    }
+  },
+  "throttled": {
+    "data": {
+      "themeFilesDelete": {
+        "deletedThemeFiles": null,
+        "userErrors": [
+          {
+            "field": ["files"],
+            "message": "Too many updates in a short period. Please try again later.",
+            "code": "THROTTLED"
+          }
+        ]
+      }
+    }
+  },
+  "accessDenied": {
+    "errors": [
+      {
+        "message": "Access denied for themeFilesDelete field. Required access: `write_themes` access scope. Also: The user needs an exemption from Shopify to modify theme files.",
+        "extensions": { "code": "ACCESS_DENIED" }
+      }
+    ]
+  },
+  "productActiveUsing": {
+    "data": {
+      "product": {
+        "id": "gid://shopify/Product/1234567890",
+        "status": "ACTIVE",
+        "templateSuffix": "tc-prod_123"
+      }
+    }
+  },
+  "productActiveOther": {
+    "data": {
+      "product": {
+        "id": "gid://shopify/Product/1234567890",
+        "status": "ACTIVE",
+        "templateSuffix": "tc-prod_456"
+      }
+    }
+  },
+  "productDraftUsing": {
+    "data": {
+      "product": {
+        "id": "gid://shopify/Product/1234567890",
+        "status": "DRAFT",
+        "templateSuffix": "tc-prod_123"
+      }
+    }
+  },
+  "productGone": {
+    "data": { "product": null }
+  }
+}

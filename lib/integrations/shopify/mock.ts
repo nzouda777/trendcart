@@ -340,7 +340,10 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
    * re-runs and publishProduct behave like the live store. Ids are
    * deterministic, so a fresh instance returns the same ids.
    */
-  const products = new Map<string, { handle: string; status: ShopifyProductRef["status"] }>();
+  const products = new Map<
+    string,
+    { handle: string; status: ShopifyProductRef["status"]; templateSuffix?: string | null }
+  >();
   /** Generated templates written by upsertProductTemplate (shop/suffix → JSON). */
   const writtenTemplates = new Map<string, Record<string, unknown>>();
 
@@ -493,6 +496,31 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
       writtenTemplates.set(`${creds.shopDomain}/${input.suffix}`, structuredClone(input.template));
     },
 
+    async deleteProductTemplate(creds, input) {
+      assertCreds(creds);
+      if (!isGeneratedTemplateSuffix(input.suffix)) {
+        throw shopifyError("invalid_input", "Mock Shopify: only product.tc-*.json can be deleted.", {
+          retryable: false,
+        });
+      }
+      if (input.productId !== undefined) {
+        if (!/^gid:\/\/shopify\/Product\/\d+$/.test(input.productId)) {
+          throw shopifyError("invalid_input", "Mock Shopify: productId must be a Product GID.", {
+            retryable: false,
+          });
+        }
+        const p = products.get(input.productId);
+        if (p?.status === "ACTIVE" && p.templateSuffix === input.suffix) {
+          throw shopifyError(
+            "invalid_input",
+            "Mock Shopify: the template is used by a published product.",
+            { retryable: false },
+          );
+        }
+      }
+      return { deleted: writtenTemplates.delete(`${creds.shopDomain}/${input.suffix}`) };
+    },
+
     async ensureMetafieldDefinitions(creds) {
       assertCreds(creds);
     },
@@ -507,10 +535,16 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
       const productId = `gid://shopify/Product/${numericId(creds.shopDomain, "product", seed)}`;
       const known = products.get(productId);
       if (known) {
+        // productSet updates the template on a re-run, like live.
+        known.templateSuffix = p.templateSuffix ?? null;
         return productRef(creds.shopDomain, productId, known.handle, known.status);
       }
       const handle = slugify(p.title);
-      products.set(productId, { handle, status: "DRAFT" });
+      products.set(productId, {
+        handle,
+        status: "DRAFT",
+        templateSuffix: p.templateSuffix ?? null,
+      });
       return productRef(creds.shopDomain, productId, handle, "DRAFT");
     },
 
@@ -565,7 +599,7 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
       }
       const known = products.get(productId);
       const handle = known?.handle ?? `product-${productId.split("/").pop()}`;
-      products.set(productId, { handle, status: "ACTIVE" });
+      products.set(productId, { ...known, handle, status: "ACTIVE" });
       return productRef(creds.shopDomain, productId, handle, "ACTIVE");
     },
 
@@ -576,7 +610,7 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
       }
       const known = products.get(productId);
       const handle = known?.handle ?? `product-${productId.split("/").pop()}`;
-      products.set(productId, { handle, status: "DRAFT" });
+      products.set(productId, { ...known, handle, status: "DRAFT" });
       return productRef(creds.shopDomain, productId, handle, "DRAFT");
     },
   };

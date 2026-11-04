@@ -259,3 +259,65 @@ describe("generated template", () => {
     expect(isGeneratedTemplateSuffix("trendcart")).toBe(false);
   });
 });
+
+describe("Liquid in AI-written text (QA N5)", () => {
+  const TYPES = ["text", "inline_richtext", "richtext", "textarea"] as const;
+  const DELIMITER = /\{\{|\}\}|\{%|%\}/;
+  const ATTACKS = [
+    "Hello {{ shop.metafields.custom.secret.value }} {% render 'x' %}",
+    "Trim {{- product.metafields.custom.cost.value -}} and {%- liquid echo shop.email -%}",
+    "Nested {{{% raw %}}} {{{{ x }}}} {%% if %%}",
+    "Unterminated {{ shop.email",
+    "Zero width {​{ shop.email }​}",
+    "Bidi {‮% render 'x' %‬}",
+    "Tags {<b></b>{ shop.email }<i></i>}",
+    "Entity-free split {\n{ shop.email }\n}",
+    "Rebuilt {{{x}}}{ { y } } {%{%}%}",
+  ];
+
+  it("no delimiter survives in any text type, plain or obfuscated", () => {
+    for (const type of TYPES) {
+      for (const attack of ATTACKS) {
+        const value = settingValue({ id: "t", type, label: "T" }, attack);
+        expect(String(value ?? ""), `${type}: ${attack}`).not.toMatch(DELIMITER);
+        expect(String(value ?? ""), `${type}: ${attack}`).not.toMatch(/[{}]/);
+      }
+    }
+  });
+
+  it("drops the whole Liquid span, keeps the surrounding copy", () => {
+    expect(
+      settingValue(
+        { id: "t", type: "text", label: "T" },
+        "Hello {{ shop.metafields.custom.secret.value }} world {% render 'x' %}!",
+      ),
+    ).toBe("Hello world !");
+    expect(
+      settingValue({ id: "t", type: "richtext", label: "T" }, "- Fast {{- shop.email -}}\n- Safe"),
+    ).toBe("<ul><li>Fast</li><li>Safe</li></ul>");
+    expect(settingValue({ id: "t", type: "text", label: "T" }, "{{ shop.email }}")).toBeUndefined();
+    expect(
+      settingValue({ id: "t", type: "textarea", label: "T" }, "Line one\n{% if x %}\nLine two"),
+    ).toBe("Line one\n\nLine two");
+  });
+
+  it("no delimiter reaches the generated template JSON", () => {
+    const attack = "Glow {{ shop.metafields.custom.secret.value }} {​% render 'x' %​}";
+    const { template } = buildGeneratedTemplate(
+      BASE,
+      {
+        mainBlocks: [],
+        sections: [
+          {
+            type: "multicolumn",
+            purpose: "Benefits",
+            settings: [{ id: "title", value: attack }],
+            blocks: [{ type: "column", settings: [{ id: "text", value: attack }] }],
+          },
+        ],
+      },
+      [MULTI],
+    );
+    expect(JSON.stringify(template)).not.toMatch(/shop\.metafields|\{\{|\{%/);
+  });
+});

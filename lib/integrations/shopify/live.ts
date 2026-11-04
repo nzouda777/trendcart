@@ -52,6 +52,7 @@ import {
   PRODUCT_ACTIVATE_MUTATION,
   PRODUCT_BY_CUSTOM_ID_QUERY,
   PRODUCT_DRAFT_MUTATION,
+  PRODUCT_GID,
   PRODUCT_REF_QUERY,
   PRODUCT_SET_MUTATION,
   PUBLISHABLE_PUBLISH_MUTATION,
@@ -259,6 +260,33 @@ export const THEME_FILES_UPSERT_MUTATION = /* GraphQL */ `
   }
 `;
 
+/** Same requirements as themeFilesUpsert (write_themes + exemption). */
+export const THEME_FILES_DELETE_MUTATION = /* GraphQL */ `
+  mutation TrendcartThemeFilesDelete($themeId: ID!, $files: [String!]!) {
+    themeFilesDelete(themeId: $themeId, files: $files) {
+      deletedThemeFiles {
+        filename
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+/** Whether a product still renders with a template (before deleting it). */
+export const PRODUCT_TEMPLATE_USAGE_QUERY = /* GraphQL */ `
+  query TrendcartProductTemplateUsage($id: ID!) {
+    product(id: $id) {
+      id
+      status
+      templateSuffix
+    }
+  }
+`;
+
 /** Every product metafield definition (names and types of template slots). */
 export const PRODUCT_METAFIELD_DEFINITIONS_QUERY = /* GraphQL */ `
   query TrendcartProductMetafieldDefinitions($after: String) {
@@ -362,6 +390,17 @@ type ThemeFilesUpsertData = {
     upsertedThemeFiles: { filename: string }[] | null;
     userErrors: UserError[];
   };
+};
+
+type ThemeFilesDeleteData = {
+  themeFilesDelete: {
+    deletedThemeFiles: { filename: string }[] | null;
+    userErrors: UserError[];
+  };
+};
+
+type ProductTemplateUsageData = {
+  product: { id: string; status: string; templateSuffix: string | null } | null;
 };
 
 type ProductDefinitionsData = {
@@ -700,6 +739,72 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       }
       assertNoUserErrors("themeFilesUpsert", data.themeFilesUpsert.userErrors);
       forgetTemplates(creds.shopDomain);
+    },
+
+    async deleteProductTemplate(creds, input) {
+      // Refused before any call: never a merchant template, never a path.
+      if (!isGeneratedTemplateSuffix(input.suffix)) {
+        throw shopifyError(
+          "invalid_input",
+          "Trendcart only deletes the templates it generates (product.tc-*.json).",
+          { retryable: false },
+        );
+      }
+      if (input.productId !== undefined && !PRODUCT_GID.test(input.productId)) {
+        throw shopifyError("invalid_input", "productId must be a Shopify Product GID.", {
+          retryable: false,
+        });
+      }
+      if (input.productId) {
+        const usage = await gql<ProductTemplateUsageData>(creds, PRODUCT_TEMPLATE_USAGE_QUERY, {
+          id: input.productId,
+        });
+        const p = usage.product;
+        if (p && p.status === "ACTIVE" && p.templateSuffix === input.suffix) {
+          throw shopifyError(
+            "invalid_input",
+            "The template is used by a published product; unpublish it or switch its template first.",
+            { retryable: false },
+          );
+        }
+      }
+      const theme = await gql<{ themes: { nodes: { id: string }[] } }>(creds, MAIN_THEME_ID_QUERY);
+      const themeId = theme.themes.nodes[0]?.id;
+      // No published theme: nothing of ours can be live.
+      if (!themeId) return { deleted: false };
+      const filename = templateFilename(input.suffix);
+      let data: ThemeFilesDeleteData;
+      try {
+        data = await gql<ThemeFilesDeleteData>(creds, THEME_FILES_DELETE_MUTATION, {
+          themeId,
+          files: [filename],
+        });
+      } catch (error) {
+        if (error instanceof IntegrationError && error.code === "permission_denied") {
+          throw shopifyError(
+            "permission_denied",
+            "Shopify refused to delete the generated theme template: the app needs the write_themes scope and Shopify's theme-modification exemption.",
+            { retryable: false, cause: error },
+          );
+        }
+        throw error;
+      }
+      const { deletedThemeFiles, userErrors } = data.themeFilesDelete;
+      if (userErrors.some((e) => e.code === "THROTTLED")) {
+        throw shopifyError("rate_limited", "Shopify throttled theme file changes; retry shortly.", {
+          retryable: true,
+        });
+      }
+      // Already gone (deleted by hand, or an earlier attempt): idempotent.
+      const missing = userErrors.filter(
+        (e) => e.code === "NOT_FOUND" || /not (be )?found|does not exist/i.test(e.message),
+      );
+      assertNoUserErrors(
+        "themeFilesDelete",
+        userErrors.filter((e) => !missing.includes(e)),
+      );
+      forgetTemplates(creds.shopDomain);
+      return { deleted: (deletedThemeFiles ?? []).some((f) => f.filename === filename) };
     },
 
     ensureMetafieldDefinitions,

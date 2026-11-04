@@ -41,7 +41,22 @@ export type AttachVideoInput = {
   proxyUrl?: string;
 };
 
-/** ShopifyClient plus the token-lifecycle methods the contract does not cover yet. */
+/** deleteProductTemplate input (QA N6). */
+export type DeleteProductTemplateInput = {
+  /** A Trendcart-generated suffix ("tc-..."); anything else is refused before any call. */
+  suffix: string;
+  /**
+   * The Shopify product the template was generated for, when it exists. If
+   * that product is ACTIVE and still uses this template the delete is refused
+   * (the live page would silently fall back to the default template).
+   */
+  productId?: string;
+};
+
+/**
+ * ShopifyClient plus the methods the contract does not cover yet (token
+ * lifecycle, generated-template cleanup).
+ */
 export interface ShopifyAdapter extends ShopifyClient {
   readonly mode: "mock" | "live";
   attachVideoFromUrl(creds: ShopifyCredentials, input: AttachVideoInput): Promise<ShopifyMediaRef>;
@@ -56,6 +71,17 @@ export interface ShopifyAdapter extends ShopifyClient {
     refreshToken: string;
     app?: ShopifyAppCredentials;
   }): Promise<ShopifyInstallToken>;
+  /**
+   * Deletes templates/product.<suffix>.json from the published (MAIN) theme
+   * (themeFilesDelete: write_themes + the theme-modification exemption, like
+   * upsertProductTemplate). Only "tc-" suffixes; merchant templates are
+   * refused before any call. Idempotent: an already-missing file resolves
+   * with `deleted: false`.
+   */
+  deleteProductTemplate(
+    creds: ShopifyCredentials,
+    input: DeleteProductTemplateInput,
+  ): Promise<{ deleted: boolean }>;
 }
 
 export type { ShopifyToken };
