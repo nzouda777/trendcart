@@ -10,7 +10,8 @@ import { isPublicHostname } from "@/lib/integrations/tiktok-data/net-guard";
 
 import { normalizeProductUrl } from "./links";
 
-export type CandidateOrigin = "lens" | "shopping";
+/** "site": a Google web search restricted to one required marketplace. */
+export type CandidateOrigin = "lens" | "shopping" | "site";
 
 export type ListingCandidate = {
   /** Canonical URL (dedupe key). */
@@ -24,6 +25,13 @@ export type ListingCandidate = {
   /** Shipping/delivery shown on the search result, when parseable. */
   shipping: Money | null;
   images: string[];
+  /** Rating out of 5 and review count shown on the search result, when any. */
+  rating: number | null;
+  reviewCount: number | null;
+  /** Delivery time when the source states it (marketplace APIs). */
+  leadTimeDays?: { min: number; max: number } | null;
+  /** Marketplace product id (CJ pid), to fetch more details later. */
+  externalId?: string;
   origin: CandidateOrigin;
   /** 1-based rank inside its search. */
   position: number;
@@ -256,6 +264,7 @@ export function keywordScore(title: string, keywords: string[]): number {
 /** Visual-similarity proxy from the search rank (Lens ranks by similarity). */
 function rankSignal(c: Pick<ListingCandidate, "origin" | "position">): number {
   if (c.origin === "shopping") return 0.45;
+  if (c.origin === "site") return Math.max(0.3, 0.55 - (c.position - 1) * 0.03);
   return Math.max(0.3, 1 - (c.position - 1) * 0.04);
 }
 
@@ -300,6 +309,8 @@ export function rankCandidates(
       price: keep.price ?? other.price,
       shipping: keep.shipping ?? other.shipping,
       images: keep.images.length ? keep.images : other.images,
+      rating: keep.rating ?? other.rating,
+      reviewCount: keep.reviewCount ?? other.reviewCount,
     });
   }
   return [...byUrl.values()]
@@ -310,3 +321,69 @@ export function rankCandidates(
 }
 
 export const isGoogleHost = (host: string) => GOOGLE_HOST.test(host.toLowerCase());
+
+/** A product page (not a search, store or category page) of a required marketplace. */
+export function isMarketplaceProductPage(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  switch (marketplaceFor(u.hostname)?.key) {
+    case "aliexpress":
+      return /^\/item\/\d{6,}\.html$/.test(u.pathname);
+    case "amazon":
+      return /^\/dp\/[A-Z0-9]{10}$/.test(u.pathname);
+    case "cjdropshipping":
+      return /^\/product\/[^/]+\.html$/.test(u.pathname);
+    default:
+      return true;
+  }
+}
+
+/** Amazon storefront for a country (Amazon only lists in its own marketplace). */
+const AMAZON_BY_COUNTRY: Record<string, string> = {
+  US: "amazon.com",
+  CA: "amazon.ca",
+  GB: "amazon.co.uk",
+  UK: "amazon.co.uk",
+  FR: "amazon.fr",
+  DE: "amazon.de",
+  ES: "amazon.es",
+  IT: "amazon.it",
+  NL: "amazon.nl",
+  AU: "amazon.com.au",
+  MX: "amazon.com.mx",
+  JP: "amazon.co.jp",
+  IN: "amazon.in",
+};
+
+/** Domain searched for a required marketplace in the brand's country. */
+export function marketplaceSearchDomain(source: string, country: string): string {
+  if (source === "amazon") return AMAZON_BY_COUNTRY[country.toUpperCase()] ?? "amazon.com";
+  if (source === "cjdropshipping") return "cjdropshipping.com";
+  return "aliexpress.com";
+}
+
+/** A rating out of 5, or null. */
+export function toRating(value: unknown): number | null {
+  const n = typeof value === "string" ? Number(value.replace(",", ".")) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 && n <= 5
+    ? Math.round(n * 10) / 10
+    : null;
+}
+
+/** A review count ("1,234", "2.3K", 87), or null. */
+export function toReviewCount(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 && value < 1e8 ? Math.round(value) : null;
+  }
+  if (typeof value !== "string") return null;
+  const m = value.replace(/\s/g, "").match(/^(\d+(?:[.,]\d+)?)([kKmM]?)/);
+  if (!m) return null;
+  const unit = m[2]!.toLowerCase();
+  const base = unit ? Number(m[1]!.replace(",", ".")) : Number(m[1]!.replace(/[.,]/g, ""));
+  const n = base * (unit === "k" ? 1e3 : unit === "m" ? 1e6 : 1);
+  return Number.isFinite(n) && n < 1e8 ? Math.round(n) : null;
+}

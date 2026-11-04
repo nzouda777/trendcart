@@ -2,7 +2,7 @@
 
 import { CheckCircle2Icon, ExternalLinkIcon, SearchXIcon } from "lucide-react";
 import Link from "next/link";
-import { useId, useRef, useState, useTransition } from "react";
+import { useEffect, useId, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { ShopifyStoreOptionDTO, SupplierDTO, SupplierQuoteDTO } from "@/lib/services/types";
@@ -15,6 +15,13 @@ import { SelectField, TextAreaField, TextField } from "../form-controls";
 import { formatMoney, formatPercent, hostOf } from "../format";
 import { ProductThumb } from "../product-thumb";
 import { rebuildLimitAction } from "./limit-action";
+import {
+  decodeTemplate,
+  encodeTemplate,
+  TemplatePicker,
+  templateLabel,
+  type TemplateMode,
+} from "./template-picker";
 
 export type PriceInput = {
   supplierMatchId: string;
@@ -26,9 +33,17 @@ export type PriceInput = {
 
 type SelectInput = PriceInput & {
   shopifyConnectionId?: string;
+  /** Omitted: the store's default template. */
+  templateSuffix?: string | null;
+  templateMode?: TemplateMode;
+  templateWithImages?: boolean;
   acceptLowMargin: boolean;
   note?: string;
 };
+
+type StoreTemplates =
+  | { storeId: string; ok: true; suffixes: (string | null)[] }
+  | { storeId: string; ok: false; error: string };
 
 const PRICE_SOURCE_LABEL: Record<SupplierQuoteDTO["priceSource"], string> = {
   pricing_rule: "Brand pricing rule",
@@ -113,6 +128,7 @@ export function SupplierChoice({
   onQuote,
   onSelect,
   onRejectAll,
+  onListTemplates,
 }: {
   suppliers: SupplierDTO[];
   stores: ShopifyStoreOptionDTO[];
@@ -125,6 +141,8 @@ export function SupplierChoice({
   onQuote: (input: PriceInput) => Promise<ActionResult<SupplierQuoteDTO>>;
   onSelect: (input: SelectInput) => Promise<ActionResult>;
   onRejectAll: (input: { note?: string }) => Promise<ActionResult>;
+  /** Product templates of a store's live theme, for the template picker. */
+  onListTemplates: (connectionId: string) => Promise<ActionResult<{ suffixes: (string | null)[] }>>;
 }) {
   const baseId = useId();
   const [selectedId, setSelectedId] = useState(suppliers[0]?.id ?? "");
@@ -135,10 +153,34 @@ export function SupplierChoice({
   const [quoting, startQuote] = useTransition();
   const [acceptLow, setAcceptLow] = useState(false);
   const [note, setNote] = useState("");
-  const activeStores = stores.filter((s) => s.status === "active");
+  // "expiring" stores still hold a working token (GATE 2 accepts them too).
+  const isUsable = (s: ShopifyStoreOptionDTO) => s.status === "active" || s.status === "expiring";
+  const activeStores = stores.filter(isUsable);
   const [storeId, setStoreId] = useState(activeStores[0]?.id ?? "");
   const timer = useRef<number | null>(null);
   const requestSeq = useRef(0);
+  const [templates, setTemplates] = useState<StoreTemplates | null>(null);
+  /** Picked template per store (encoded); unset = the store's default. */
+  const [pickedTemplate, setPickedTemplate] = useState<Record<string, string>>({});
+  const [templateMode, setTemplateMode] = useState<TemplateMode>("existing");
+  const [templateWithImages, setTemplateWithImages] = useState(false);
+
+  // The store's theme templates, read again when the store changes.
+  useEffect(() => {
+    if (!canDecide || !storeId) return;
+    let cancelled = false;
+    void onListTemplates(storeId).then((result) => {
+      if (cancelled) return;
+      setTemplates(
+        result.ok
+          ? { storeId, ok: true, suffixes: result.data.suffixes }
+          : { storeId, ok: false, error: result.error },
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [canDecide, storeId, onListTemplates]);
 
   const supplier = suppliers.find((s) => s.id === selectedId) ?? null;
   const needsFx =
@@ -207,21 +249,34 @@ export function SupplierChoice({
 
   const lowMargin = quoteMatches && !quote.margin.meetsTarget;
   const store = stores.find((s) => s.id === storeId) ?? null;
+  const storeTemplates = templates && templates.storeId === storeId ? templates : null;
+  const templatesLoading = canDecide && !!storeId && !storeTemplates;
+  const templateOptions = storeTemplates?.ok ? storeTemplates.suffixes : [];
+  const defaultTemplate =
+    store && templateOptions.includes(store.templateSuffix)
+      ? store.templateSuffix
+      : (templateOptions[0] ?? null);
+  const templateValue = pickedTemplate[storeId] ?? encodeTemplate(defaultTemplate);
+  // Unreadable theme or no JSON template: the store's default applies (undefined).
+  const chosenTemplate = templateOptions.length > 0 ? decodeTemplate(templateValue) : undefined;
+  const mode = store?.canWriteThemes && chosenTemplate !== undefined ? templateMode : "existing";
   const canSubmit =
     canDecide &&
     !!supplier &&
     quoteMatches &&
     !quoting &&
+    !templatesLoading &&
     Object.keys(fieldErrors).length === 0 &&
     !!store &&
-    store.status === "active" &&
+    isUsable(store) &&
     (!lowMargin || acceptLow);
 
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       <fieldset className="grid min-w-0 content-start gap-3">
         <legend className="mb-3 text-sm font-medium">
-          {suppliers.length} {suppliers.length === 1 ? "listing" : "listings"}, best match first
+          {suppliers.length} {suppliers.length === 1 ? "listing" : "listings"}, best value for money
+          first
         </legend>
         {suppliers.map((s) => {
           const inputId = `${baseId}-supplier-${s.id}`;
@@ -250,13 +305,20 @@ export function SupplierChoice({
                   <label htmlFor={inputId} className="min-w-0 cursor-pointer text-sm font-medium">
                     {s.title}
                   </label>
-                  <Pill tone={s.matchScore >= 0.7 ? "success" : "neutral"}>
-                    Match {formatPercent(s.matchScore)}
-                  </Pill>
+                  <span className="flex flex-wrap gap-1">
+                    {s.valueScore !== null ? (
+                      <Pill tone={s.valueScore >= 0.7 ? "success" : "neutral"}>
+                        Value {formatPercent(s.valueScore)}
+                      </Pill>
+                    ) : null}
+                    <Pill tone={s.matchScore >= 0.7 ? "success" : "neutral"}>
+                      Match {formatPercent(s.matchScore)}
+                    </Pill>
+                  </span>
                 </div>
                 <dl
                   id={`${inputId}-meta`}
-                  className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4"
+                  className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-5"
                 >
                   <div>
                     <dt className="text-muted-foreground">Price</dt>
@@ -279,6 +341,18 @@ export function SupplierChoice({
                   <div>
                     <dt className="text-muted-foreground">Source</dt>
                     <dd className="truncate">{s.source || hostOf(s.url)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Rating</dt>
+                    <dd className="tabular-nums">
+                      {s.rating === null
+                        ? "Not listed"
+                        : `${s.rating.toFixed(1)}/5${
+                            s.reviewCount !== null
+                              ? ` (${s.reviewCount.toLocaleString("en")} reviews)`
+                              : ""
+                          }`}
+                    </dd>
                   </div>
                 </dl>
                 {s.variants.length > 0 ? (
@@ -327,7 +401,7 @@ export function SupplierChoice({
             hint="The draft product page is created on this store."
             options={stores.map((s) => ({
               value: s.id,
-              label: s.status === "active" ? s.shopDomain : `${s.shopDomain} (reconnect needed)`,
+              label: isUsable(s) ? s.shopDomain : `${s.shopDomain} (reconnect needed)`,
             }))}
           />
         ) : (
@@ -336,6 +410,34 @@ export function SupplierChoice({
             {stores[0]!.shopDomain}
           </p>
         )}
+
+        {canDecide && store && isUsable(store) ? (
+          templatesLoading ? (
+            <p aria-live="polite" className="text-sm text-muted-foreground">
+              Reading the store&apos;s product templates…
+            </p>
+          ) : templateOptions.length > 0 ? (
+            <TemplatePicker
+              id={baseId}
+              suffixes={templateOptions}
+              storeDefault={store.templateSuffix}
+              value={templateValue}
+              onChange={(value) => setPickedTemplate((prev) => ({ ...prev, [storeId]: value }))}
+              mode={mode}
+              onModeChange={setTemplateMode}
+              canGenerate={store.canWriteThemes}
+              withImages={templateWithImages}
+              onWithImagesChange={setTemplateWithImages}
+            />
+          ) : (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
+              {storeTemplates && !storeTemplates.ok
+                ? `The theme's templates could not be read (${storeTemplates.error}). `
+                : "The live theme has no JSON product template. "}
+              The store&apos;s default template is used.
+            </p>
+          )
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <TextField
@@ -452,10 +554,15 @@ export function SupplierChoice({
                         , margin {formatPercent(quote.margin.marginRate)}.
                       </p>
                       <p className="mt-2">
-                        Trendcart then writes the page and creates it as a{" "}
-                        <strong className="text-foreground">draft</strong> on {store.shopDomain}.
-                        Nothing is published before Gate 3. Your approval is recorded with your
-                        name.
+                        Trendcart then writes the page
+                        {chosenTemplate === undefined
+                          ? ""
+                          : mode === "generate"
+                            ? `, has Claude design a conversion-optimised template from ${templateLabel(chosenTemplate)}`
+                            : ` for the template ${templateLabel(chosenTemplate)}`}{" "}
+                        and creates it as a <strong className="text-foreground">draft</strong> on{" "}
+                        {store.shopDomain}. Nothing is published before Gate 3. Your approval is
+                        recorded with your name.
                       </p>
                     </>
                   ) : (
@@ -476,6 +583,13 @@ export function SupplierChoice({
                   return onSelect({
                     ...input,
                     shopifyConnectionId: storeId || undefined,
+                    ...(chosenTemplate !== undefined
+                      ? {
+                          templateSuffix: chosenTemplate,
+                          templateMode: mode,
+                          templateWithImages: mode === "generate" && templateWithImages,
+                        }
+                      : {}),
                     acceptLowMargin: acceptLow,
                     note: note.trim() || undefined,
                   });
@@ -492,7 +606,7 @@ export function SupplierChoice({
               </ConfirmDialog>
               <RejectSuppliersButton onReject={onRejectAll} label="None of these" />
             </div>
-            {activeStores.length > 0 && (!store || store.status !== "active") ? (
+            {activeStores.length > 0 && (!store || !isUsable(store)) ? (
               <p className="text-xs text-warning">Choose a store that is connected.</p>
             ) : null}
           </div>

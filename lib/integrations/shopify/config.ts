@@ -26,6 +26,25 @@ export const SHOPIFY_SCOPES = [
   "write_publications",
 ] as const;
 
+/**
+ * Optional scope for templates Claude designs (themeFilesUpsert). Shopify also
+ * requires its theme-modification exemption for the app. Requested only when
+ * SHOPIFY_THEME_WRITES=1 (the app config must list it too); never required,
+ * so stores installed without it keep working with existing templates.
+ */
+export const SHOPIFY_THEME_WRITE_SCOPE = "write_themes";
+
+/** Scopes asked at install: the required ones, plus write_themes when enabled. */
+export function requestedShopifyScopes(env: NodeJS.ProcessEnv = process.env): string[] {
+  return env.SHOPIFY_THEME_WRITES === "1"
+    ? [...SHOPIFY_SCOPES, SHOPIFY_THEME_WRITE_SCOPE]
+    : [...SHOPIFY_SCOPES];
+}
+
+/** Whether a store's granted scopes allow writing generated templates. */
+export const canWriteThemes = (scopes: readonly string[]) =>
+  scopes.includes(SHOPIFY_THEME_WRITE_SCOPE);
+
 /** Metafields shown on generated product pages (namespace `custom`, owner PRODUCT). */
 export const SHOPIFY_METAFIELD_DEFINITIONS = [
   {

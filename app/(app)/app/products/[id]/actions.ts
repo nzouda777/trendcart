@@ -9,9 +9,11 @@ import { STALE_COPY_FIELD } from "@/components/app/product/page-state";
 import type { PageCopy } from "@/lib/domain/contracts";
 import {
   approvePage,
+  changePageTemplate,
   confirmProduct,
   deleteProduct,
   goBackOneStep,
+  listShopifyTemplates,
   quoteSupplierChoice,
   regeneratePageCopy,
   rejectPage,
@@ -117,10 +119,28 @@ export async function quoteSupplierAction(
   return explain(result, {});
 }
 
-/** GATE 2: choose a listing, the target store and the prices. Starts the page build. */
+/** GATE 2 template picker: product templates of a store's live theme (null = product.json). */
+export async function listStoreTemplatesAction(
+  connectionId: string,
+): Promise<ActionResult<{ suffixes: (string | null)[] }>> {
+  const result = await runAction(async (ctx) => {
+    const { suffixes } = await listShopifyTemplates(ctx, connectionId);
+    return { suffixes };
+  });
+  return explain(result, {});
+}
+
+/** GATE 2: choose a listing, the target store, the page template and the prices. Starts the page build. */
 export async function selectSupplierAction(
   productId: string,
-  input: PriceInput & { shopifyConnectionId?: string; acceptLowMargin: boolean; note?: string },
+  input: PriceInput & {
+    shopifyConnectionId?: string;
+    templateSuffix?: string | null;
+    templateMode?: "existing" | "generate";
+    templateWithImages?: boolean;
+    acceptLowMargin: boolean;
+    note?: string;
+  },
 ): Promise<ActionResult> {
   const result = await runAction(async (ctx) => {
     await selectSupplier(ctx, { productId, ...input, note: optionalText(input.note) });
@@ -177,6 +197,24 @@ export async function updatePageCopyAction(
     invalid_state: PAGE_CLOSED,
     conflict: CONFLICT,
     forbidden: "Your role cannot edit the page.",
+  });
+}
+
+/** GATE 3: rebuild the page on another template, or on one Claude designs (CRO). */
+export async function changePageTemplateAction(
+  productId: string,
+  input: { mode: "existing" | "generate"; templateSuffix: string | null; withImages: boolean },
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await changePageTemplate(ctx, { productId, ...input });
+    return undefined;
+  });
+  if (result.ok) refresh();
+  return explain(result, {
+    invalid_state: PAGE_CLOSED,
+    conflict: CONFLICT,
+    forbidden: "Your role cannot change the page template.",
+    rate_limited: REBUILD_LIMIT,
   });
 }
 

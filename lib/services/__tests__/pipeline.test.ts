@@ -32,6 +32,7 @@ import { createBrand } from "../brands";
 import { listShopifyTemplates, setShopifyTemplate } from "../connections";
 import {
   approvePage,
+  changePageTemplate,
   getProductPipeline,
   goBackOneStep,
   listSuppliers,
@@ -98,20 +99,31 @@ function mockIntegrations(overrides: Partial<Integrations> = {}) {
   const base = createIntegrations("mock");
   const find = vi.fn(base.supplierFinder.find);
   const writePage = vi.fn(base.copywriter.writePage);
+  const designTemplate = vi.fn(base.copywriter.designTemplate);
+  const upsertProductTemplate = vi.fn(base.shopify.upsertProductTemplate);
   const createDraftProduct = vi.fn(base.shopify.createDraftProduct);
   const publishProduct = vi.fn(base.shopify.publishProduct);
   const shopify = Object.assign(Object.create(base.shopify) as object, base.shopify, {
     createDraftProduct,
     publishProduct,
+    upsertProductTemplate,
   }) as Integrations["shopify"];
   const integrations: Integrations = {
     ...base,
     supplierFinder: { find },
-    copywriter: { writePage },
+    copywriter: { writePage, designTemplate },
     shopify,
     ...overrides,
   };
-  return { integrations, find, writePage, createDraftProduct, publishProduct };
+  return {
+    integrations,
+    find,
+    writePage,
+    designTemplate,
+    upsertProductTemplate,
+    createDraftProduct,
+    publishProduct,
+  };
 }
 
 async function atGate2(mocks = mockIntegrations()) {
@@ -144,7 +156,7 @@ describe("M2 full mock flow: TikTok link → published Shopify page", () => {
 
     // Sourcing ran right after GATE 1 and stopped at GATE 2.
     expect(find).toHaveBeenCalledTimes(1);
-    expect(find.mock.calls[0]![1]).toMatchObject({ country: "FR", currency: "EUR", limit: 5 });
+    expect(find.mock.calls[0]![1]).toMatchObject({ country: "FR", currency: "EUR", limit: 6 });
     let pipeline = await getProductPipeline(env.a.viewer, productId);
     expect(pipeline.gate).toBe("supplier_choice");
     expect(pipeline.suppliers.length).toBeGreaterThan(0);
@@ -459,7 +471,10 @@ describe("GATE 3: page approval, rejection, regeneration, edits", () => {
       .mockResolvedValueOnce({ data: altCopy("First draft"), usage: [] })
       .mockResolvedValueOnce({ data: altCopy("Second draft"), usage: [] })
       .mockResolvedValue({ data: altCopy("Third draft"), usage: [] });
-    const mocks = mockIntegrations({ copywriter: { writePage } });
+    const base = createIntegrations("mock");
+    const mocks = mockIntegrations({
+      copywriter: { writePage, designTemplate: base.copywriter.designTemplate },
+    });
     const { productId, deps, createDraftProduct } = await atGate3(mocks);
     expect(writePage).toHaveBeenCalledTimes(1);
 
@@ -725,7 +740,7 @@ describe("Shopify templates (M1 open question 7)", () => {
     const deps = testDeps(createIntegrations("mock"));
     expect(await listShopifyTemplates(env.a.viewer, store.id, deps)).toEqual({
       connectionId: store.id,
-      suffixes: [null, "trendcart"],
+      suffixes: [null, "landing", "trendcart"],
       hasTrendcartTemplate: true,
     });
     await expect(
@@ -741,6 +756,139 @@ describe("Shopify templates (M1 open question 7)", () => {
       deps,
     );
     expect(cleared.templateSuffix).toBeNull();
+  });
+
+  it("builds the page on the template chosen at GATE 2 and fills its sections' metafields", async () => {
+    const store = await insertStore(); // store default: "trendcart"
+    const { productId, deps, writePage, createDraftProduct } = await atGate2();
+    const [s] = await listSuppliers(env.a.creative, productId);
+    const choose = (templateSuffix: string | null) =>
+      selectSupplier(
+        env.a.creative,
+        { productId, supplierMatchId: s!.id, acceptLowMargin: true, templateSuffix },
+        deps,
+      );
+
+    await expect(choose("missing")).rejects.toMatchObject({ code: "invalid_input" });
+    const chosen = await choose("landing");
+    expect(chosen.status).toBe("awaiting_content_approval");
+    expect(chosen.supplierChoice).toMatchObject({
+      shopifyConnectionId: store.id,
+      templateSuffix: "landing",
+    });
+
+    // The copywriter got the template's slots, and the copy fills each of them.
+    expect(writePage.mock.calls[0]![1].template?.slots.map((x) => x.key)).toEqual([
+      "tagline",
+      "how_to_use",
+      "in_the_box",
+    ]);
+    expect(chosen.pageCopy?.templateFields?.map((f) => [f.key, f.label])).toEqual([
+      ["tagline", "Tagline"],
+      ["how_to_use", "How to use"],
+      ["in_the_box", "In the box"],
+    ]);
+
+    // The draft uses the chosen template (not the store default) and gets the metafields.
+    const draft = createDraftProduct.mock.calls[0]![1];
+    expect(draft.templateSuffix).toBe("landing");
+    expect(draft.extraMetafields?.map((m) => [m.key, m.type])).toEqual([
+      ["tagline", "single_line_text_field"],
+      ["how_to_use", "rich_text_field"],
+      ["in_the_box", "list.single_line_text_field"],
+    ]);
+  });
+});
+
+describe("Claude-designed (CRO) templates", () => {
+  it("needs write_themes, writes product.tc-<id>.json and builds the draft on it; GATE 3 can switch back", async () => {
+    const store = await insertStore();
+    const { productId, deps, designTemplate, upsertProductTemplate, createDraftProduct } =
+      await atGate2();
+    const [s] = await listSuppliers(env.a.creative, productId);
+    const choose = () =>
+      selectSupplier(
+        env.a.creative,
+        {
+          productId,
+          supplierMatchId: s!.id,
+          acceptLowMargin: true,
+          templateSuffix: null,
+          templateMode: "generate",
+        },
+        deps,
+      );
+
+    // The store did not grant theme writes: refused before anything is recorded.
+    await expect(choose()).rejects.toMatchObject({ code: "precondition_failed" });
+    expect(designTemplate).not.toHaveBeenCalled();
+
+    await env.a.owner.db.update(
+      shopifyConnection,
+      { scopes: ["write_products", "write_themes"] },
+      eq(shopifyConnection.id, store.id),
+    );
+    const built = await choose();
+    expect(built.status).toBe("awaiting_content_approval");
+    expect(designTemplate).toHaveBeenCalledTimes(1);
+    const designInput = designTemplate.mock.calls[0]![1];
+    expect(designInput.sections.map((x) => x.type)).toEqual([
+      "collapsible-content",
+      "image-with-text",
+      "multicolumn",
+      "rich-text",
+    ]);
+    // Art direction: the model sees the photos and the theme color schemes; buy box blocks.
+    expect(designInput.imageUrls.length).toBeGreaterThan(0);
+    expect(designInput.colorSchemes.map((c) => c.id)).toContain("scheme-3");
+    expect(designInput.mainSection?.blocks.map((b) => b.type)).toEqual([
+      "text",
+      "collapsible_tab",
+      "icon-with-text",
+    ]);
+    expect(designInput.withImages).toBe(false);
+
+    const written = upsertProductTemplate.mock.calls[0]![1];
+    expect(written.suffix).toMatch(/^tc-/);
+    const template = written.template as {
+      order: string[];
+      sections: Record<string, { type: string }>;
+    };
+    // The base buy box first (with CRO blocks added), then the designed sections.
+    const main = template.sections[template.order[0]!] as unknown as {
+      type: string;
+      block_order: string[];
+    };
+    expect(main.type).toBe("main-product");
+    expect(main.block_order.some((id) => id.startsWith("tc_"))).toBe(true);
+    expect(template.order.length).toBeGreaterThan(1);
+    const json = JSON.stringify(template);
+    // Buttons go back to this product; no theme placeholder label; no image without permission.
+    expect(json).toMatch(/shopify:\/\/products\/[a-z0-9-]+/);
+    expect(json).not.toContain("Button label");
+    expect(json).not.toContain("shopify://shop_images/");
+
+    expect(createDraftProduct.mock.calls.at(-1)![1].templateSuffix).toBe(written.suffix);
+    expect(built.pageTemplate).toMatchObject({
+      mode: "generate",
+      suffix: null,
+      generated: { suffix: written.suffix },
+    });
+    expect(built.pageTemplate!.generated!.sections.length).toBeGreaterThan(0);
+
+    // GATE 3: back to an existing template; the page is written again on it.
+    const switched = await changePageTemplate(
+      env.a.creative,
+      { productId, mode: "existing", templateSuffix: "landing" },
+      deps,
+    );
+    expect(switched.status).toBe("awaiting_content_approval");
+    expect(switched.pageTemplate).toMatchObject({ mode: "existing", suffix: "landing" });
+    expect(createDraftProduct.mock.calls.at(-1)![1].templateSuffix).toBe("landing");
+    expect(upsertProductTemplate).toHaveBeenCalledTimes(1);
+    await expect(
+      changePageTemplate(env.a.viewer, { productId, mode: "existing", templateSuffix: null }, deps),
+    ).rejects.toBeInstanceOf(ForbiddenError);
   });
 });
 

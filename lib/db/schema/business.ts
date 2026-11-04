@@ -35,6 +35,7 @@ import {
   type ComplianceReport,
   type Gate,
   type PageCopy,
+  type PageTemplateChoice,
   type ProductAnalysis,
   type ProductStatus,
 } from "../../domain/contracts";
@@ -339,6 +340,12 @@ export const product = pgTable(
     pageCopy: jsonb("page_copy").$type<PageCopy>(),
     /** When `page_copy` was last (re)generated. */
     pageCopyGeneratedAt: tz("page_copy_generated_at"),
+    /**
+     * Product template the page is built on (chosen at GATE 2, changeable at
+     * GATE 3): an existing theme template, or one Claude generates. Null on
+     * products built before: the GATE 2 choice / store default applies.
+     */
+    pageTemplate: jsonb("page_template").$type<PageTemplateChoice>(),
     createdByUserId: text("created_by_user_id").references(() => user.id, {
       onDelete: "set null",
     }),

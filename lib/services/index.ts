@@ -57,6 +57,7 @@ export {
   goBackOneStep,
   listSuppliers,
   quoteSupplierChoice,
+  changePageTemplate,
   regeneratePageCopy,
   rejectPage,
   rejectSuppliers,

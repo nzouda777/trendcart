@@ -11,6 +11,7 @@ import {
   IntegrationError,
   pageCopySchema,
   type PageCopy,
+  type PageTemplateChoice,
   type Integrations,
   type ShopifyProductRef,
 } from "@/lib/domain/contracts";
@@ -29,6 +30,7 @@ import {
   shopifyProduct,
   supplierMatch,
 } from "@/lib/db/schema";
+import { canWriteThemes } from "@/lib/integrations/shopify/config";
 import { quoteSupplier, type SupplierQuote } from "@/lib/sourcing";
 import type { UserWorkspaceContext, WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
@@ -36,6 +38,7 @@ import { pageCopyVersion } from "@/lib/workflows/copy-version";
 import {
   approvalState,
   decisionOrder,
+  effectiveTemplateSuffix,
   gatePartStates,
   loadSupplierChoice,
   lockProduct,
@@ -43,6 +46,7 @@ import {
   type SupplierChoicePayload,
 } from "@/lib/workflows/gate-payloads";
 import { latestFailedStep } from "@/lib/workflows/jobs";
+import { resolvePageTemplate } from "@/lib/workflows/page-template";
 import { applyProductEventTo } from "@/lib/workflows/product-status";
 import type { SupplierDetails } from "@/lib/workflows/steps/source";
 import {
@@ -88,9 +92,19 @@ function toSupplierDTO(r: SupplierRow): SupplierDTO {
     images: r.images,
     variants: (details.variants ?? []).map((v) => ({ name: v.name, values: v.values })),
     matchScore: details.matchScore ?? 0,
+    valueScore: details.valueScore ?? null,
+    rating: details.rating ?? null,
+    reviewCount: details.reviewCount ?? null,
     selected: r.selected,
     createdAt: iso(r.createdAt),
   };
+}
+
+/** Best quality/price ratio first (match score for listings stored before it), then best match. */
+function bySupplierValue(a: SupplierDTO, b: SupplierDTO): number {
+  return (
+    (b.valueScore ?? b.matchScore) - (a.valueScore ?? a.matchScore) || b.matchScore - a.matchScore
+  );
 }
 
 function toQuoteDTO(supplierMatchId: string, q: SupplierQuote): SupplierQuoteDTO {
@@ -196,10 +210,10 @@ async function loadPipeline(
   const claim =
     contentParts.page === "publishing" ? await publishingPageClaim(ctx.db, row.id) : null;
 
-  // Sorted by match score, the selected one first.
+  // Best value first (quality/price ratio), the selected one first.
   const supplierDTOs = suppliers
     .map(toSupplierDTO)
-    .sort((a, b) => Number(b.selected) - Number(a.selected) || b.matchScore - a.matchScore);
+    .sort((a, b) => Number(b.selected) - Number(a.selected) || bySupplierValue(a, b));
 
   return {
     ...detail,
@@ -211,6 +225,10 @@ async function loadPipeline(
           approvalId: choice.approvalId,
           supplierMatchId: choice.supplierMatchId,
           shopifyConnectionId: choice.shopifyConnectionId,
+          templateSuffix: effectiveTemplateSuffix(
+            choice,
+            stores.find((s) => s.id === choice.shopifyConnectionId)?.templateSuffix ?? null,
+          ),
           fxRate: choice.fxRate,
           warnings: choice.warnings,
         }
@@ -220,7 +238,15 @@ async function loadPipeline(
       shopDomain: s.shopDomain,
       status: s.status,
       templateSuffix: s.templateSuffix,
+      canWriteThemes: canWriteThemes(s.scopes),
     })),
+    pageTemplate: choice
+      ? resolvePageTemplate(
+          row,
+          choice,
+          stores.find((s) => s.id === choice.shopifyConnectionId)?.templateSuffix ?? null,
+        )
+      : null,
     pageCopy: row.pageCopy,
     pageCopyGeneratedAt: isoOrNull(row.pageCopyGeneratedAt),
     pageCopyVersion: pageCopyVersion(row.pageCopy),
@@ -253,7 +279,7 @@ export async function listSuppliers(
     where: eq(supplierMatch.productId, id),
     orderBy: (t) => t.createdAt,
   });
-  return rows.map(toSupplierDTO).sort((a, b) => b.matchScore - a.matchScore);
+  return rows.map(toSupplierDTO).sort(bySupplierValue);
 }
 
 /* GATE 2: quote and selection ---------------------------------------------- */
@@ -334,6 +360,19 @@ export async function quoteSupplierChoice(
 const selectSupplierSchema = quoteSchema.extend({
   /** Target store; optional when the brand has exactly one active store. */
   shopifyConnectionId: idSchema.optional(),
+  /**
+   * Product template of the store's theme the page is built on (null =
+   * templates/product.json). Omitted: the store's default template.
+   */
+  templateSuffix: z.string().min(1).max(100).nullable().optional(),
+  /**
+   * "generate": Claude designs a conversion-oriented template for this
+   * product from the theme sections, on top of `templateSuffix` (base).
+   * Needs the store to have granted write_themes.
+   */
+  templateMode: z.enum(["existing", "generate"]).default("existing"),
+  /** generate: the designed sections may show the product photos. */
+  templateWithImages: z.boolean().default(false),
   /** Required to go on with a margin below the brand minimum. */
   acceptLowMargin: z.boolean().default(false),
   note: z.string().trim().max(2000).optional(),
@@ -373,6 +412,35 @@ async function resolveStore(
 }
 
 /**
+ * A named template must exist in the store's live theme; a generated one also
+ * needs the store to have granted write_themes (Shopify exemption).
+ */
+async function assertTemplateUsable(
+  ctx: WorkspaceContext,
+  store: Row<typeof shopifyConnection>,
+  suffix: string | null,
+  mode: PageTemplateChoice["mode"],
+  deps: ServiceDeps,
+): Promise<void> {
+  if (mode === "generate" && !canWriteThemes(store.scopes)) {
+    throw new ServiceError(
+      "precondition_failed",
+      "This store does not allow Trendcart to add templates to its theme (write_themes). Use an existing template, or reconnect the store once theme writes are enabled.",
+    );
+  }
+  if (suffix === null) return;
+  const integrations = resolveIntegrations(deps);
+  const { creds } = await getShopifyCredentialsFor(ctx, integrations, store.id);
+  const suffixes = await integrations.shopify.listProductTemplates(creds);
+  if (!suffixes.includes(suffix)) {
+    throw new ServiceError(
+      "invalid_input",
+      `The store's theme has no "product.${suffix}" template.`,
+    );
+  }
+}
+
+/**
  * GATE 2: a human picks one supplier listing, the target store, and confirms
  * the prices (brand pricing rule, min-margin floor, or manual). Records the
  * approval (payload: SupplierChoicePayload), marks the listing selected,
@@ -389,6 +457,16 @@ export async function selectSupplier(
   const v = selectSupplierSchema.parse(input);
   const userId = ctx.actor.userId;
 
+  // A named template must exist in the store's live theme (checked before the
+  // transaction: it is a Shopify call). The store is resolved again inside.
+  let checkedStoreId: string | null = null;
+  if (typeof v.templateSuffix === "string" || v.templateMode === "generate") {
+    const pre = await ctx.db.getById(product, v.productId);
+    const store = await resolveStore(ctx.db, pre.brandId, v.shopifyConnectionId);
+    await assertTemplateUsable(ctx, store, v.templateSuffix ?? null, v.templateMode, deps);
+    checkedStoreId = store.id;
+  }
+
   const approvalId = await ctx.db.transaction(async (tx) => {
     const row = await lockProduct(tx, v.productId);
     if (row.status !== "awaiting_supplier_choice") {
@@ -397,6 +475,17 @@ export async function selectSupplier(
     const supplier = await loadSupplierOf(tx, row.id, v.supplierMatchId);
     const brandRow = await tx.getById(brand, row.brandId);
     const store = await resolveStore(tx, row.brandId, v.shopifyConnectionId);
+    if (checkedStoreId !== null && checkedStoreId !== store.id) {
+      throw new ServiceError("conflict", "The brand's stores changed meanwhile. Try again.");
+    }
+    // Recorded as decided: later changes of the store default do not move this page.
+    const templateSuffix = v.templateSuffix !== undefined ? v.templateSuffix : store.templateSuffix;
+    const pageTemplate: PageTemplateChoice = {
+      mode: v.templateMode,
+      suffix: templateSuffix,
+      withImages: v.templateMode === "generate" && v.templateWithImages,
+      generated: null,
+    };
     const quote = quoteFor(supplier, brandRow, v);
     if (!quote.margin.meetsTarget && !v.acceptLowMargin) {
       throw new ServiceError(
@@ -408,6 +497,8 @@ export async function selectSupplier(
     const payload: SupplierChoicePayload = {
       supplierMatchId: supplier.id,
       shopifyConnectionId: store.id,
+      templateSuffix,
+      templateMode: v.templateMode,
       sellingPrice: quote.sellingPrice,
       compareAtPrice: quote.compareAtPrice,
       priceSource: quote.priceSource,
@@ -436,6 +527,7 @@ export async function selectSupplier(
       {
         sellingPrice: quote.sellingPrice,
         compareAtPrice: quote.compareAtPrice,
+        pageTemplate,
         margin: {
           currency: m.currency,
           productCost: m.productCost,
@@ -459,6 +551,8 @@ export async function selectSupplier(
           approvalId: recorded.id,
           supplierMatchId: supplier.id,
           shopifyConnectionId: store.id,
+          templateSuffix,
+          templateMode: v.templateMode,
           sellingPrice: quote.sellingPrice,
           priceSource: quote.priceSource,
           meetsTarget: m.meetsTarget,
@@ -880,8 +974,10 @@ export async function approvePage(
 async function sendPageBack(
   ctx: UserWorkspaceContext,
   v: z.infer<typeof gateNoteSchema>,
-  kind: "reject" | "regenerate",
+  kind: "reject" | "regenerate" | "template",
   deps: ServiceDeps,
+  /** Set with the cleared copy, in the same transaction (template change). */
+  pageTemplate?: PageTemplateChoice,
 ): Promise<ProductPipelineDTO> {
   const userId = ctx.actor.userId;
   await assertRebuildAllowed(ctx, v.productId, "awaiting_content_approval", deps);
@@ -901,7 +997,7 @@ async function sendPageBack(
       row,
       { type: "gate_rejected", productId: row.id, approval: evidenceOf(recorded) },
       // Cleared copy = the build step writes a new one (same Shopify draft).
-      { pageCopy: null, pageCopyGeneratedAt: null },
+      { pageCopy: null, pageCopyGeneratedAt: null, ...(pageTemplate ? { pageTemplate } : {}) },
     );
     await writeAudit(
       { ...ctx, db: tx },
@@ -915,6 +1011,9 @@ async function sendPageBack(
           kind,
           approvalId: recorded.id,
           hasNote: !!v.note,
+          ...(pageTemplate
+            ? { templateMode: pageTemplate.mode, templateSuffix: pageTemplate.suffix }
+            : {}),
         },
       },
     );
@@ -944,6 +1043,42 @@ export async function rejectPage(
 ): Promise<ProductPipelineDTO> {
   requirePermission(ctx, "gate:content_approval");
   return sendPageBack(ctx, gateNoteSchema.parse(input), "reject", deps);
+}
+
+const changeTemplateSchema = z.object({
+  productId: idSchema,
+  mode: z.enum(["existing", "generate"]),
+  /** existing: the template; generate: the base template. null = product.json. */
+  templateSuffix: z.string().min(1).max(100).nullable(),
+  /** generate: the designed sections may show the product photos. */
+  withImages: z.boolean().default(false),
+});
+
+/**
+ * GATE 3: rebuild the page on another template, or have Claude design a CRO
+ * template for it. Checked like GATE 2 (template exists, write_themes for
+ * "generate"), then recorded, audited and rate-limited like a regeneration:
+ * the copy is cleared and the build step writes a new page on that template.
+ */
+export async function changePageTemplate(
+  ctx: WorkspaceContext,
+  input: z.input<typeof changeTemplateSchema>,
+  deps: ServiceDeps = {},
+): Promise<ProductPipelineDTO> {
+  requirePermission(ctx, "gate:content_approval");
+  const v = changeTemplateSchema.parse(input);
+  const row = await ctx.db.getById(product, v.productId);
+  await assertPageOpen(ctx.db, row);
+  const choice = await loadSupplierChoice(ctx.db, row.id);
+  if (!choice) throw new ServiceError("invalid_state", "This product has no supplier choice.");
+  const store = await ctx.db.getById(shopifyConnection, choice.shopifyConnectionId);
+  await assertTemplateUsable(ctx, store, v.templateSuffix, v.mode, deps);
+  return sendPageBack(ctx, { productId: row.id }, "template", deps, {
+    mode: v.mode,
+    suffix: v.templateSuffix,
+    withImages: v.mode === "generate" && v.withImages,
+    generated: null,
+  });
 }
 
 /** Same as rejectPage without a verdict: "write it again". Recorded, audited and limited the same way. */

@@ -240,6 +240,8 @@ applies to edits, so tell reviewers.
   set"**: the key is missing in live mode. Set it, redeploy, then click **Retry step** on the
   product.
 - **Copy writing fails with "`ANTHROPIC_API_KEY` is not set"**: same fix.
+- **Anthropic 400 "This API key is not scoped to a workspace"**: set `ANTHROPIC_WORKSPACE_ID` to
+  the Console workspace id, or replace the key with one created inside a workspace.
 - **Build step fails with "The page copy has unsafe claims"** more than once: the AI keeps
   writing a forbidden claim, often because of the listing text. Retry, or reject at Gate 2 and
   choose another listing.

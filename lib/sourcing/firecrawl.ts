@@ -23,7 +23,7 @@ import { IntegrationError, type AiUsage, type Money } from "@/lib/domain/contrac
 import { firecrawlUsage } from "@/lib/ai/pricing";
 import { httpStatusError, networkError, type HttpFetch } from "@/lib/integrations/tiktok-data/http";
 
-import { cleanImageUrls, toMoney } from "./ranking";
+import { cleanImageUrls, toMoney, toRating, toReviewCount } from "./ranking";
 
 export const FIRECRAWL_BASE_URL = "https://api.firecrawl.dev";
 const PROVIDER = "firecrawl";
@@ -65,6 +65,14 @@ export const listingExtractionSchema = z.object({
     )
     .describe("Purchasable options. Empty when the product has none."),
   inStock: z.boolean().nullable(),
+  rating: z
+    .number()
+    .nullable()
+    .describe("Average rating of this product out of 5 as printed, null if not shown."),
+  reviewCount: z
+    .number()
+    .nullable()
+    .describe("Number of ratings or reviews of this product as printed, null if not shown."),
 });
 
 export const listingExtractionJsonSchema = z.toJSONSchema(listingExtractionSchema);
@@ -89,6 +97,8 @@ const extractedSchema = z.looseObject({
     .optional()
     .nullable(),
   inStock: z.boolean().optional().nullable(),
+  rating: z.unknown().optional(),
+  reviewCount: z.unknown().optional(),
 });
 
 const responseSchema = z.looseObject({
@@ -117,6 +127,8 @@ export type ExtractedListing = {
   leadTimeDays: { min: number; max: number } | null;
   images: string[];
   variants: { name: string; values: string[] }[];
+  rating: number | null;
+  reviewCount: number | null;
 };
 
 export type FirecrawlConfig = {
@@ -180,6 +192,8 @@ export function normalizeExtraction(
     leadTimeDays,
     images: cleanImageUrls(x.images ?? [], 10),
     variants,
+    rating: toRating(x.rating),
+    reviewCount: toReviewCount(x.reviewCount),
   };
 }
 
@@ -188,7 +202,7 @@ const PROMPT = (currency: string, country: string) =>
     "Extract the offer of the single product sold on this page.",
     `The buyer ships to country ${country}. If the page shows prices in several currencies, prefer ${currency}.`,
     "Report only values printed on the page. Use null when a value is not shown; never estimate.",
-    "Ignore reviews, ratings, recommendations and other products.",
+    "Report the average rating and the number of reviews of this product only as printed. Ignore review texts, recommendations and other products.",
   ].join(" ");
 
 /**

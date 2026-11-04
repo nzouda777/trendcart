@@ -16,6 +16,9 @@ import { useId, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { PageCopy } from "@/lib/domain/contracts";
+
+/** Same as TEMPLATE_FIELD_MAX in lib/domain/contracts (not imported: keeps zod out of the bundle). */
+const TEMPLATE_FIELD_MAX = 5000;
 import type { ShopifyPageDTO } from "@/lib/services/types";
 import { cn } from "@/lib/utils";
 
@@ -408,6 +411,41 @@ export function PageCopyPreview({ copy, prices }: { copy: PageCopy; prices: Pric
             ))}
           </div>
         </div>
+        {copy.templateFields?.length ? (
+          <div className="grid gap-2">
+            <SubHeading>Template sections</SubHeading>
+            <dl className="grid gap-2">
+              {copy.templateFields.map((f) => (
+                <div
+                  key={`${f.namespace}.${f.key}`}
+                  className="grid gap-1 rounded-lg border border-border bg-background p-3"
+                >
+                  <dt className="text-xs text-muted-foreground">
+                    {f.label}{" "}
+                    <span className="font-mono">
+                      ({f.namespace}.{f.key})
+                    </span>
+                  </dt>
+                  <dd className="text-sm text-pretty">
+                    {f.type === "list.single_line_text_field" ? (
+                      <ul className="list-disc pl-4 marker:text-brand-text">
+                        {f.value.split("\n").map((item, i) => (
+                          <li key={`${i}-${item}`}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      f.value.split(/\n\s*\n/).map((para, i) => (
+                        <p key={`${i}-${para.slice(0, 20)}`} className="whitespace-pre-line">
+                          {para}
+                        </p>
+                      ))
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : null}
       </div>
 
       <div className="grid min-w-0 content-start gap-5">
@@ -484,6 +522,7 @@ function PageCopyEditor({
   const [adTexts, setAdTexts] = useState(copy.adTexts);
   const [seoTitle, setSeoTitle] = useState(copy.seo?.title ?? "");
   const [seoDescription, setSeoDescription] = useState(copy.seo?.description ?? "");
+  const [templateFields, setTemplateFields] = useState(copy.templateFields ?? []);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -505,6 +544,9 @@ function PageCopyEditor({
       else if (t.trim().length > AD_TEXTS.chars) {
         e[`adTexts.${i}`] = `Keep it to ${AD_TEXTS.chars} characters.`;
       }
+    });
+    templateFields.forEach((f, i) => {
+      if (!f.value.trim()) e[`templateFields.${i}.value`] = "Enter some text for this section.";
     });
     const st = seoTitle.trim();
     const sd = seoDescription.trim();
@@ -534,6 +576,9 @@ function PageCopyEditor({
       guarantee: guarantee.trim(),
       adTexts: adTexts.map((t) => t.trim()),
       ...(st && sd ? { seo: { title: st, description: sd } } : {}),
+      ...(copy.templateFields
+        ? { templateFields: templateFields.map((f) => ({ ...f, value: f.value.trim() })) }
+        : {}),
     };
     startTransition(async () => {
       const result = await onSave(patch);
@@ -643,6 +688,34 @@ function PageCopyEditor({
         error={errors.guarantee}
         required
       />
+
+      {templateFields.length > 0 ? (
+        <fieldset className="grid gap-3 rounded-xl border border-border p-3">
+          <legend className="px-1 text-sm font-medium">Template sections</legend>
+          {templateFields.map((f, i) => (
+            <TextAreaField
+              key={`${f.namespace}.${f.key}`}
+              id={`${id}-tpl-${i}`}
+              label={`${f.label} (${f.namespace}.${f.key})`}
+              value={f.value}
+              rows={f.type === "single_line_text_field" ? 1 : 4}
+              maxLength={TEMPLATE_FIELD_MAX}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                setTemplateFields(templateFields.map((x, j) => (j === i ? { ...x, value: v } : x)));
+              }}
+              hint={
+                f.type === "list.single_line_text_field"
+                  ? "One item per line."
+                  : f.type === "single_line_text_field"
+                    ? "One line."
+                    : "Plain text. Separate paragraphs with a blank line."
+              }
+              error={errors[`templateFields.${i}.value`]}
+            />
+          ))}
+        </fieldset>
+      ) : null}
 
       <ListEditor
         legend={`Ad texts (${AD_TEXTS.min} to ${AD_TEXTS.max}, ${AD_TEXTS.chars} characters max)`}

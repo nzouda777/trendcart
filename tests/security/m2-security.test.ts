@@ -87,9 +87,11 @@ describe("Shopify GraphQL inputs", () => {
       metafields: { highlights: [], faq: [], guarantee: "" },
     });
     expect(vars.input.title).toBe(evil);
-    expect(vars.identifier).toEqual({
-      customId: { namespace: "trendcart", key: "product_id", value: "p1" },
-    });
+    // New product: plain create; the custom ID travels as a metafield only.
+    expect(vars.identifier).toBeUndefined();
+    expect(vars.input.metafields).toContainEqual(
+      expect.objectContaining({ namespace: "trendcart", key: "product_id", value: "p1" }),
+    );
   });
 });
 
@@ -158,6 +160,9 @@ describe("prompt injection from scraped listings into page copy", () => {
     referenceImageUrl: null,
   } as unknown as ProductAnalysis;
   const listing = (title: string): SupplierListing => ({
+    rating: null,
+    reviewCount: null,
+    valueScore: 0,
     source: "aliexpress",
     url: "https://www.aliexpress.com/item/1005000000000001.html",
     title,

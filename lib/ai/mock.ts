@@ -8,10 +8,13 @@ import {
   analyzeInputSchema,
   pageCopySchema,
   productAnalysisSchema,
+  templatePlanSchema,
   type Copywriter,
   type PageCopy,
   type ProductAnalysis,
   type ProductAnalyzer,
+  type TemplatePlan,
+  type ThemeSectionSpec,
 } from "@/lib/domain/contracts";
 
 import { DEFAULT_MODELS, tokenUsage } from "./pricing";
@@ -165,8 +168,82 @@ const STRINGS: Record<"en" | "fr", CopyStrings> = {
 const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/**
+ * Deterministic template plan: up to 5 of the theme's sections, in catalog
+ * order, plus up to 3 buy box blocks; every setting filled from the copy
+ * (highlights, FAQ, guarantee), buttons back to the product, the first color
+ * scheme, product photos when images are allowed.
+ */
+function mockTemplatePlan(input: Parameters<Copywriter["designTemplate"]>[1]): TemplatePlan {
+  const { copy, sections, mainSection, colorSchemes, withImages, imageUrls } = input;
+  const texts = [copy.title, ...copy.highlights, copy.guarantee];
+  let n = 0;
+  let image = 0;
+  const fill = (settings: ThemeSectionSpec["settings"], i: number) =>
+    settings.flatMap((s) => {
+      if (s.type === "select" || s.type === "radio")
+        return s.options?.[0] ? [{ id: s.id, value: s.options[0] }] : [];
+      if (s.type === "checkbox" || s.type === "range" || s.type === "number") return [];
+      if (s.type === "url") return [{ id: s.id, value: "product" }];
+      if (s.type === "color_scheme")
+        return colorSchemes[0]
+          ? [{ id: s.id, value: colorSchemes[i % colorSchemes.length]!.id }]
+          : [];
+      if (s.type === "image_picker")
+        return withImages && imageUrls.length
+          ? [{ id: s.id, value: `image:${image++ % imageUrls.length}` }]
+          : [];
+      const faq = copy.faq[i % copy.faq.length]!;
+      const value =
+        s.type === "richtext" || s.type === "textarea"
+          ? s.id.includes("content")
+            ? faq.answer
+            : texts[n++ % texts.length]!
+          : s.id.includes("heading") && settings.some((x) => x.id.includes("content"))
+            ? faq.question
+            : texts[n++ % texts.length]!;
+      return [{ id: s.id, value }];
+    });
+  const usable = sections.filter((x) => withImages || !x.hasMediaSettings);
+  return templatePlanSchema.parse({
+    mainBlocks: (mainSection?.blocks ?? []).slice(0, 3).map((b, i) => ({
+      type: b.type,
+      position: i === 0 ? "after_price" : "after_buy_buttons",
+      settings: fill(b.settings, i),
+    })),
+    sections: usable.slice(0, 5).map((section, si) => ({
+      type: section.type,
+      purpose: `Mock: ${section.name}`,
+      settings: fill(section.settings, si),
+      blocks: section.blocks
+        .filter((b) => b.settings.length > 0)
+        .flatMap((b) =>
+          Array.from({ length: Math.min(3, b.limit ?? 3) }, (_, i) => ({
+            type: b.type,
+            settings: fill(b.settings, i),
+          })),
+        )
+        .slice(0, Math.min(section.maxBlocks ?? 6, 6)),
+    })),
+  });
+}
+
 export function createMockCopywriter(): Copywriter {
   return {
+    async designTemplate(_ctx, input) {
+      return {
+        data: mockTemplatePlan(input),
+        usage: [
+          tokenUsage(
+            "anthropic",
+            DEFAULT_MODELS.copywriting,
+            MOCK_TOKENS.copywriting,
+            MOCK_USAGE_DATE,
+          ),
+        ],
+      };
+    },
+
     async writePage(_ctx, input) {
       const s = input.language === "fr" ? STRINGS.fr : STRINGS.en;
       const a = input.analysis;
@@ -196,6 +273,22 @@ export function createMockCopywriter(): Copywriter {
         guarantee: s.guarantee(brand),
         adTexts: s.ad(name, points[0] ?? a.category),
         seo: s.seo(name, points[0] ?? a.category),
+        ...(input.template?.slots.length
+          ? {
+              templateFields: input.template.slots.map((slot) => ({
+                namespace: slot.namespace,
+                key: slot.key,
+                type: slot.type,
+                label: slot.name.slice(0, 255) || slot.key,
+                value:
+                  slot.type === "list.single_line_text_field"
+                    ? highlights.join("\n")
+                    : slot.type === "single_line_text_field"
+                      ? (points[0] ?? name).slice(0, 255)
+                      : `${a.description}`.slice(0, 2000) || name,
+              })),
+            }
+          : {}),
       });
       return {
         data,

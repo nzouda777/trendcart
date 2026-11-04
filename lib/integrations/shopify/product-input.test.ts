@@ -15,6 +15,7 @@ import {
   plainText,
   sanitizeDraftInput,
   seoFor,
+  templateFieldsToMetafields,
   TEXT_LIMITS,
 } from "./product-input";
 import {
@@ -266,5 +267,77 @@ describe("template kit", () => {
   it("detects whether the live theme already has the template", () => {
     expect(hasTrendcartTemplate([null, "trendcart"])).toBe(true);
     expect(hasTrendcartTemplate([null, "bundle"])).toBe(false);
+  });
+});
+
+describe("template fields → metafields", () => {
+  const field = (
+    type: Parameters<typeof templateFieldsToMetafields>[0][number]["type"],
+    value: string,
+  ) => ({
+    namespace: "custom",
+    key: "slot",
+    type,
+    label: "Slot",
+    value,
+  });
+
+  it("writes each type in Shopify's value format, as plain text", () => {
+    const [single, multi, list, rich] = templateFieldsToMetafields([
+      field("single_line_text_field", "Glow <b>all</b>\nnight"),
+      {
+        ...field("multi_line_text_field", "First   para.\n\n\n<script>x</script>Second."),
+        key: "m",
+      },
+      { ...field("list.single_line_text_field", "- Lamp\n\n• USB cable\n"), key: "l" },
+      { ...field("rich_text_field", "One.\n\nTwo\nlines."), key: "r" },
+    ]);
+    expect(single!.value).toBe("Glow all night");
+    expect(multi!.value).toBe("First para.\n\nSecond.");
+    expect(JSON.parse(list!.value)).toEqual(["Lamp", "USB cable"]);
+    expect(JSON.parse(rich!.value)).toEqual({
+      type: "root",
+      children: [
+        { type: "paragraph", children: [{ type: "text", value: "One." }] },
+        { type: "paragraph", children: [{ type: "text", value: "Two lines." }] },
+      ],
+    });
+  });
+
+  it("drops fields emptied by cleaning and never overrides Trendcart's own metafields", () => {
+    expect(templateFieldsToMetafields([field("single_line_text_field", "<p></p>")])).toEqual([]);
+    const vars = buildProductSetVariables({
+      ...shopifyDraftProductInputSchema.parse({
+        idempotencyKey: "p1",
+        title: "Lamp",
+        descriptionHtml: "<p>x</p>",
+        templateSuffix: "landing",
+        options: [],
+        variants: [{ optionValues: [], price: 10, compareAtPrice: null }],
+        imageUrls: [],
+        metafields: { highlights: [], faq: [], guarantee: "" },
+      }),
+      extraMetafields: [
+        { namespace: "custom", key: "tagline", type: "single_line_text_field", value: "Hi" },
+        {
+          namespace: "trendcart",
+          key: "product_id",
+          type: "single_line_text_field",
+          value: "evil",
+        },
+        {
+          namespace: "custom",
+          key: "highlights",
+          type: "list.single_line_text_field",
+          value: '["x"]',
+        },
+      ],
+    });
+    const metafields = vars.input.metafields as { namespace: string; key: string; value: string }[];
+    expect(metafields).toContainEqual(expect.objectContaining({ key: "tagline", value: "Hi" }));
+    expect(metafields.filter((m) => m.namespace === "trendcart")).toEqual([
+      expect.objectContaining({ key: "product_id", value: "p1" }),
+    ]);
+    expect(metafields.some((m) => m.key === "highlights")).toBe(false);
   });
 });

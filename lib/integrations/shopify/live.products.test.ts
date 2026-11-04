@@ -124,10 +124,9 @@ describe("live createDraftProduct", () => {
 
     const v = calls[2]!.variables as SetVariables;
     expect(v.synchronous).toBe(true);
-    // New product: upsert on the custom ID, so a concurrent run cannot duplicate it.
-    expect(v.identifier).toEqual({
-      customId: { namespace: "trendcart", key: "product_id", value: "prod_01JTRENDCART" },
-    });
+    // New product: plain create (Shopify rejects a customId identifier alongside
+    // metafields); the unique trendcart.product_id metafield guards duplicates.
+    expect(v.identifier).toBeUndefined();
     expect(v.input).toMatchObject({
       title: "LED Sunset Lamp",
       descriptionHtml: draft.descriptionHtml,
@@ -457,8 +456,10 @@ describe("live deleteProductMedia", () => {
 
 describe("image filenames", () => {
   it("keep the source extension and default to jpg", () => {
-    expect(imageFilename("https://x.example/a/b.PNG?w=800")).toMatch(/^tc-[0-9a-f]{16}\.png$/);
-    expect(imageFilename("https://x.example/a/b.jpeg")).toMatch(/\.jpg$/);
-    expect(imageFilename("https://x.example/image?id=1")).toMatch(/\.jpg$/);
+    // Shopify requires the exact source extension: copied verbatim, never invented.
+    expect(imageFilename("https://x.example/a/b.PNG?w=800")).toMatch(/^tc-[0-9a-f]{16}\.PNG$/);
+    expect(imageFilename("https://x.example/a/b.jpeg")).toMatch(/^tc-[0-9a-f]{16}\.jpeg$/);
+    expect(imageFilename("https://x.example/a/b.jpg_640x640.jpg_.webp")).toMatch(/\.webp$/);
+    expect(imageFilename("https://x.example/image?id=1")).toMatch(/^tc-[0-9a-f]{16}$/);
   });
 });

@@ -7,6 +7,7 @@ import { firecrawlUsage, serpApiUsage } from "@/lib/ai/pricing";
 import { matchSampleProduct, sampleImageUrl, seeded } from "@/lib/ai/sample-products";
 
 import { createExclusionFilter } from "./exclude";
+import { shortlistListings } from "./value";
 
 /**
  * Deterministic supplier listings for the sample product the keywords match.
@@ -20,23 +21,53 @@ import { createExclusionFilter } from "./exclude";
  */
 const DEMO_FX: Record<string, number> = { USD: 1, EUR: 0.92, GBP: 0.79, CAD: 1.37, AUD: 1.52 };
 
+/** The required marketplaces first (REQUIRED_SUPPLIER_SOURCES), then others. */
 const SOURCES = [
-  { source: "aliexpress", host: "www.aliexpress.com", path: "item", lead: [8, 15], shipping: 0 },
+  {
+    source: "aliexpress",
+    url: (id: string) => `https://www.aliexpress.com/item/${id}.html`,
+    lead: [8, 15],
+    shipping: 0,
+    markup: 1,
+    rating: 4.6,
+    reviews: 1240,
+  },
   {
     source: "cjdropshipping",
-    host: "cjdropshipping.com",
-    path: "product",
+    url: (id: string) => `https://cjdropshipping.com/product/sample-p-${id}.html`,
     lead: [6, 12],
     shipping: 2.9,
+    markup: 1.05,
+    rating: null,
+    reviews: null,
+  },
+  {
+    source: "amazon",
+    url: (id: string) => `https://www.amazon.com/dp/B0${id.slice(-8)}`,
+    lead: [2, 5],
+    shipping: 0,
+    markup: 2.4,
+    rating: 4.3,
+    reviews: 3870,
   },
   {
     source: "alibaba",
-    host: "www.alibaba.com",
-    path: "product-detail",
+    url: (id: string) => `https://www.alibaba.com/product-detail/${id}.html`,
     lead: [10, 20],
     shipping: 4.5,
+    markup: 0.9,
+    rating: 4.8,
+    reviews: 35,
   },
-  { source: "temu", host: "www.temu.com", path: "goods", lead: [7, 14], shipping: 0 },
+  {
+    source: "temu",
+    url: (id: string) => `https://www.temu.com/goods/${id}.html`,
+    lead: [7, 14],
+    shipping: 0,
+    markup: 1.1,
+    rating: 4.1,
+    reviews: 520,
+  },
 ] as const;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -46,7 +77,8 @@ export function createMockSupplierFinder(): SupplierFinder {
   return {
     async find(_ctx, input) {
       const product = matchSampleProduct(input.keywords.join(" "));
-      const currency = input.currency.toUpperCase();
+      // Like live: listings are priced in EUR for EUR brands, in USD otherwise.
+      const currency = input.currency.toUpperCase() === "EUR" ? "EUR" : "USD";
       const fx = DEMO_FX[currency] ?? 1;
       const limit = Math.min(Math.max(1, input.limit ?? SOURCES.length), SOURCES.length);
       const [lo, hi] = product.unitCostUsd;
@@ -60,15 +92,15 @@ export function createMockSupplierFinder(): SupplierFinder {
             round === 0 ? `${product.key}:${s.source}` : `${product.key}:${s.source}:${round}`,
           );
           const id = String(1_005_000_000_000 + Math.floor(r * 9_000_000_000));
-          return { s, r, url: `https://${s.host}/${s.path}/${id}.html` };
+          return { s, r, url: s.url(id) };
         }),
       )
         .flat()
         .filter((c) => !isExcluded(c.url))
         .slice(0, limit);
 
-      const listings: SupplierListing[] = pool.map(({ s, r, url }, i) => {
-        const price = round2((lo + (hi - lo) * r) * fx);
+      const found: SupplierListing[] = pool.map(({ s, r, url }, i) => {
+        const price = round2((lo + (hi - lo) * r) * fx * s.markup);
         return supplierListingSchema.parse({
           source: s.source,
           url,
@@ -76,11 +108,17 @@ export function createMockSupplierFinder(): SupplierFinder {
           price: { amount: price, currency },
           shipping: { amount: round2(s.shipping * fx), currency },
           leadTimeDays: { min: s.lead[0], max: s.lead[1] },
-          images: [1, 2, 3].map((n) => sampleImageUrl(`${product.key}-${s.source}-${n}`)),
+          // The required marketplaces show a full gallery, the others a few photos.
+          images: Array.from({ length: i < 3 ? 6 : 2 }, (_, n) =>
+            sampleImageUrl(`${product.key}-${s.source}-${n + 1}`),
+          ),
           variants: product.variants.map((v) => ({ name: v.name, values: v.values })),
-          matchScore: round2(0.94 - i * 0.07 - r * 0.03),
+          matchScore: round2(0.94 - i * 0.05 - r * 0.03),
+          rating: s.rating,
+          reviewCount: s.reviews,
         });
       });
+      const listings = shortlistListings(found, limit);
 
       const usage = [
         serpApiUsage(input.imageUrl ? "google_lens" : "google_shopping"),

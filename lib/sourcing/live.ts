@@ -6,12 +6,18 @@ import "server-only";
  *   1. Google Lens on the reference image (when there is one).
  *   2. Google Shopping on the most specific keyword when there is no image or
  *      Lens left fewer than `limit` usable candidates.
- *   3. Drop listings rejected at GATE 2 (`excludeUrls`), dedupe by canonical
- *      URL, drop content sites, rank by match, keep `limit`.
- *   4. Firecrawl JSON scrape of each kept listing (3 at a time); a failed or
+ *   3. Required marketplaces (AliExpress, CJ Dropshipping, Amazon): one Google
+ *      search restricted to each marketplace that has no matching product page
+ *      yet (in parallel; a failed one is skipped).
+ *   4. Drop listings rejected at GATE 2 (`excludeUrls`), dedupe by canonical
+ *      URL, drop content sites, rank by match; keep `limit` + 2 to scrape,
+ *      always including the best match of each required marketplace.
+ *   5. Firecrawl JSON scrape of each kept listing (4 at a time); a failed or
  *      empty scrape falls back to the search-result data when it has a price.
- *   5. Listings without a price are dropped; the rest are re-scored with the
- *      extracted title and returned best first.
+ *   6. Listings without a price are dropped; the rest are re-scored with the
+ *      extracted title, scored for quality/price (./value.ts) and the best
+ *      `limit` returned, best value first, with the best offer of each required
+ *      marketplace always in.
  *
  * Every HTTP call goes through the brand proxy when the CallContext carries
  * one, otherwise through the SSRF-guarded dispatcher. Usage is reported for
@@ -36,12 +42,39 @@ import { assertPublicHostname } from "@/lib/integrations/tiktok-data/net-guard";
 
 import { createExclusionFilter } from "./exclude";
 import { extractListing, type ExtractedListing } from "./firecrawl";
-import { matchScore, rankCandidates, type ListingCandidate } from "./ranking";
-import { lensCandidates, shoppingCandidates } from "./serpapi";
+import {
+  aliExpressCandidates,
+  cjCandidates,
+  cjGallery,
+  type AliExpressConfig,
+  type CjConfig,
+} from "./marketplaces";
+import {
+  isMarketplaceProductPage,
+  marketplaceSearchDomain,
+  matchScore,
+  rankCandidates,
+  type ListingCandidate,
+} from "./ranking";
+import {
+  amazonCandidates,
+  lensCandidates,
+  marketplaceCandidates,
+  shoppingCandidates,
+} from "./serpapi";
+import {
+  MIN_MATCH,
+  pickWithRequiredSources,
+  REQUIRED_SUPPLIER_SOURCES,
+  shortlistListings,
+  type RequiredSupplierSource,
+} from "./value";
 
-export const DEFAULT_SUPPLIER_LIMIT = 5;
+export const DEFAULT_SUPPLIER_LIMIT = 6;
 export const MAX_SUPPLIER_LIMIT = 10;
-const EXTRACT_CONCURRENCY = 3;
+const EXTRACT_CONCURRENCY = 4;
+/** Listings scraped beyond `limit`, so the value ranking has a choice. */
+const EXTRA_SCRAPES = 2;
 
 export type LiveSupplierFinderOptions = {
   /** Base fetch (tests). */
@@ -50,7 +83,43 @@ export type LiveSupplierFinderOptions = {
   firecrawlApiKey?: string;
   serpApiBaseUrl?: string;
   firecrawlBaseUrl?: string;
+  /** Marketplace API credentials (tests); default from env, absent = Google site search. */
+  cj?: CjConfig | null;
+  aliexpress?: AliExpressConfig | null;
 };
+
+/** Listing currencies kept: prices are compared and margins computed in USD or EUR. */
+export const SOURCING_CURRENCIES: ReadonlySet<string> = new Set(["USD", "EUR"]);
+
+const EURO_AMAZON_COUNTRIES = new Set(["FR", "DE", "ES", "IT", "NL"]);
+
+/**
+ * Where suppliers are searched: EUR brands in the euro market (their own
+ * Amazon when it has one, else amazon.fr), every other brand in USD (US).
+ */
+export function sourcingMarket(country: string, currency: string) {
+  if (currency.toUpperCase() === "EUR") {
+    const c = EURO_AMAZON_COUNTRIES.has(country.toUpperCase()) ? country.toUpperCase() : "FR";
+    return {
+      currency: "EUR" as const,
+      country: c,
+      amazonDomain: marketplaceSearchDomain("amazon", c),
+    };
+  }
+  return { currency: "USD" as const, country: "US", amazonDomain: "amazon.com" };
+}
+
+function cjConfigFromEnv(fetch: HttpFetch): CjConfig | null {
+  const apiKey = process.env.CJ_API_KEY?.trim();
+  return apiKey ? { apiKey, fetch } : null;
+}
+
+function aliExpressConfigFromEnv(fetch: HttpFetch): AliExpressConfig | null {
+  const appKey = process.env.ALIEXPRESS_APP_KEY?.trim();
+  const appSecret = process.env.ALIEXPRESS_APP_SECRET?.trim();
+  const trackingId = process.env.ALIEXPRESS_TRACKING_ID?.trim();
+  return appKey && appSecret && trackingId ? { appKey, appSecret, trackingId, fetch } : null;
+}
 
 const inputSchema = z.object({
   imageUrl: z.url().nullable(),
@@ -119,10 +188,12 @@ export function toListing(
     price,
     // Shipping in another currency than the price would be silently wrong in margins.
     shipping: shipping && shipping.currency === price.currency ? shipping : null,
-    leadTimeDays: x?.leadTimeDays ?? null,
+    leadTimeDays: x?.leadTimeDays ?? c.leadTimeDays ?? null,
     images: x?.images.length ? x.images : c.images,
     variants: x?.variants ?? [],
     matchScore: matchScore({ ...c, title, price }, keywords),
+    rating: x?.rating ?? c.rating,
+    reviewCount: x?.reviewCount ?? c.reviewCount,
   };
   const parsed = supplierListingSchema.safeParse(listing);
   return parsed.success ? parsed.data : null;
@@ -153,55 +224,113 @@ export function createLiveSupplierFinder(options: LiveSupplierFinderOptions = {}
       const usage: AiUsage[] = [];
       const candidates: ListingCandidate[] = [];
       const isExcluded = createExclusionFilter(input.excludeUrls);
-      // Excluded listings never take a slot, so Shopping can still top up.
+      // Excluded listings never take a slot, so other searches can still top up.
       const keep = (found: ListingCandidate[]) => found.filter((c) => !isExcluded(c.url));
+      // Prices are wanted in USD or EUR: searches run in that market.
+      const market = sourcingMarket(input.country, input.currency);
+      const query = keywords[0]!;
+      const cj = options.cj ?? cjConfigFromEnv(http);
+      const ali = options.aliexpress ?? aliExpressConfigFromEnv(http);
       let searchError: IntegrationError | null = null;
 
-      const image = lensImage(input.imageUrl);
-      if (image) {
-        try {
-          candidates.push(
-            ...keep(
-              await lensCandidates(serp, {
-                imageUrl: image,
-                country: input.country,
-                currency: input.currency,
-              }),
-            ),
-          );
-          usage.push(serpApiUsage("google_lens"));
-        } catch (error) {
-          if (!(error instanceof IntegrationError) || !error.retryable) throw error;
-          searchError = error; // try Shopping before giving up
-        }
+      async function siteSearch(source: RequiredSupplierSource) {
+        const found = await marketplaceCandidates(serp, {
+          source,
+          query,
+          country: market.country,
+          currency: market.currency,
+        });
+        usage.push(serpApiUsage("google"));
+        return found;
       }
+      // 1. The required marketplaces (official APIs when configured, Amazon through
+      //    SerpApi's Amazon engine, else a Google search on the marketplace) and
+      //    Google Lens on the reference image, all in parallel.
+      const bySource: Record<RequiredSupplierSource, () => Promise<ListingCandidate[]>> = {
+        amazon: async () => {
+          const found = await amazonCandidates(serp, {
+            query,
+            domain: market.amazonDomain,
+            currency: market.currency,
+            country: market.country,
+          });
+          usage.push(serpApiUsage("amazon"));
+          return found;
+        },
+        aliexpress: async () =>
+          ali
+            ? aliExpressCandidates(ali, {
+                query,
+                currency: market.currency,
+                country: input.country,
+              })
+            : siteSearch("aliexpress"),
+        cjdropshipping: async () =>
+          cj ? cjCandidates(cj, { query }) : siteSearch("cjdropshipping"),
+      };
+      const image = lensImage(input.imageUrl);
+      const [lens, ...markets] = await Promise.allSettled([
+        image
+          ? lensCandidates(serp, {
+              imageUrl: image,
+              country: market.country,
+              currency: market.currency,
+            })
+          : Promise.resolve(null),
+        ...REQUIRED_SUPPLIER_SOURCES.map((source) => bySource[source]()),
+      ]);
+      if (lens.status === "fulfilled" && lens.value) {
+        candidates.push(...keep(lens.value));
+        usage.push(serpApiUsage("google_lens"));
+      } else if (lens.status === "rejected") {
+        const error: unknown = lens.reason;
+        if (!(error instanceof IntegrationError) || !error.retryable) throw error;
+        searchError = error;
+      }
+      markets.forEach((result, i) => {
+        if (result.status === "fulfilled") candidates.push(...keep(result.value ?? []));
+        else {
+          // One marketplace failing (no API access, outage) never fails the search.
+          console.warn(
+            `[supplier-finder] ${REQUIRED_SUPPLIER_SOURCES[i]} search failed:`,
+            result.reason instanceof Error ? result.reason.message : result.reason,
+          );
+        }
+      });
 
+      // 2. Google Shopping tops up when the searches left too few listings.
       if (rankCandidates(candidates, keywords, limit).length < limit) {
         try {
           candidates.push(
             ...keep(
               await shoppingCandidates(serp, {
-                query: keywords[0]!,
-                country: input.country,
-                currency: input.currency,
+                query,
+                country: market.country,
+                currency: market.currency,
               }),
             ),
           );
           usage.push(serpApiUsage("google_shopping"));
         } catch (error) {
-          if (usage.length === 0) throw searchError ?? error;
-          // Lens worked: keep its candidates rather than failing the whole step.
+          if (candidates.length === 0) throw searchError ?? error;
         }
       }
 
-      const ranked = rankCandidates(candidates, keywords, limit);
+      // 3. Best matches, the best of each required marketplace always in.
+      const usable = (c: ListingCandidate) =>
+        isMarketplaceProductPage(c.url) && matchScore(c, keywords) >= MIN_MATCH;
+      const ranked = pickWithRequiredSources(rankCandidates(candidates, keywords, Infinity), {
+        limit: limit + EXTRA_SCRAPES,
+        sourceOf: (c) => c.source,
+        eligible: usable,
+      });
       const listings = await mapLimited(ranked, EXTRACT_CONCURRENCY, async (c) => {
         if (!c.extractable) return toListing(c, null, keywords);
         try {
           const { listing, usage: u } = await extractListing(firecrawl, {
             url: c.url,
-            currency: input.currency,
-            country: input.country,
+            currency: market.currency,
+            country: market.country,
           });
           usage.push(u);
           return toListing(c, listing, keywords);
@@ -215,9 +344,25 @@ export function createLiveSupplierFinder(options: LiveSupplierFinderOptions = {}
       const data = listings
         .filter((l): l is SupplierListing => l !== null)
         .filter((l) => !isExcluded(l.url))
-        .filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true)))
-        .sort((a, b) => b.matchScore - a.matchScore);
-      return { data, usage };
+        // Only USD or EUR prices: margins never depend on an unknown currency.
+        .filter((l) => SOURCING_CURRENCIES.has(l.price.currency))
+        .filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true)));
+      const shortlist = shortlistListings(data, limit);
+
+      // 4. CJ search results carry one photo: fetch the gallery of the shortlisted ones.
+      if (cj) {
+        for (const listing of shortlist.filter((l) => l.source === "cjdropshipping").slice(0, 2)) {
+          const pid = ranked.find((c) => c.url === listing.url)?.externalId;
+          if (!pid) continue;
+          try {
+            const gallery = await cjGallery(cj, pid);
+            if (gallery.length > listing.images.length) listing.images = gallery;
+          } catch {
+            // Keep the search photo.
+          }
+        }
+      }
+      return { data: shortlist, usage };
     },
   };
 }

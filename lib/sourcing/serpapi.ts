@@ -25,9 +25,14 @@ import {
   cleanImageUrls,
   currencyFromDisplay,
   isGoogleHost,
+  isMarketplaceProductPage,
+  marketplaceFor,
+  marketplaceSearchDomain,
   shippingFromDelivery,
   sourceForHost,
   toMoney,
+  toRating,
+  toReviewCount,
   type ListingCandidate,
 } from "./ranking";
 
@@ -51,6 +56,8 @@ const lensMatchSchema = z.looseObject({
     .optional()
     .nullable(),
   in_stock: z.boolean().optional().nullable(),
+  rating: z.unknown().optional(),
+  reviews: z.unknown().optional(),
 });
 
 const lensResponseSchema = z.looseObject({
@@ -68,6 +75,8 @@ const shoppingResultSchema = z.looseObject({
   extracted_price: z.number().optional().nullable(),
   thumbnail: z.string().optional().nullable(),
   delivery: z.string().optional().nullable(),
+  rating: z.unknown().optional(),
+  reviews: z.unknown().optional(),
 });
 
 const shoppingResponseSchema = z.looseObject({
@@ -166,6 +175,8 @@ export async function lensCandidates(
       price: toMoney(m.data.price?.extracted_value, currency),
       shipping: null,
       images: cleanImageUrls([m.data.image, m.data.thumbnail]),
+      rating: toRating(m.data.rating),
+      reviewCount: toReviewCount(m.data.reviews),
       origin: "lens",
       position: m.data.position ?? i + 1,
       extractable: !isGoogleHost(host),
@@ -209,9 +220,152 @@ export async function shoppingCandidates(
       price: toMoney(r.data.extracted_price, currency),
       shipping: shippingFromDelivery(r.data.delivery, currency),
       images: cleanImageUrls([r.data.thumbnail]),
+      rating: toRating(r.data.rating),
+      reviewCount: toReviewCount(r.data.reviews),
       origin: "shopping",
       position: r.data.position ?? i + 1,
       extractable: !google,
+    });
+  }
+  return out;
+}
+
+const extensionsSchema = z
+  .looseObject({
+    price: z.number().optional().nullable(),
+    currency: z.string().optional().nullable(),
+    rating: z.unknown().optional(),
+    reviews: z.unknown().optional(),
+  })
+  .optional()
+  .nullable();
+
+const organicResultSchema = z.looseObject({
+  position: z.number().optional(),
+  title: z.string().optional().nullable(),
+  link: z.string().optional().nullable(),
+  thumbnail: z.string().optional().nullable(),
+  rich_snippet: z
+    .looseObject({
+      top: z.looseObject({ detected_extensions: extensionsSchema }).optional().nullable(),
+      bottom: z.looseObject({ detected_extensions: extensionsSchema }).optional().nullable(),
+    })
+    .optional()
+    .nullable(),
+});
+
+const organicResponseSchema = z.looseObject({
+  error: z.string().optional(),
+  organic_results: z.array(z.unknown()).optional().nullable(),
+});
+
+/**
+ * Product pages of one required marketplace for a keyword query: a Google web
+ * search restricted to the marketplace (`site:aliexpress.com lamp`), keeping
+ * only links that are product pages of that marketplace.
+ *
+ *   GET https://serpapi.com/search?engine=google&q=site:<domain> <query>&gl=<cc>&hl=en&num=10
+ *     -> organic_results[]: position, title, link, thumbnail?,
+ *        rich_snippet?.{top,bottom}.detected_extensions { price, currency, rating, reviews }
+ */
+export async function marketplaceCandidates(
+  config: SerpApiConfig,
+  input: { source: string; query: string; country: string; currency: string },
+): Promise<ListingCandidate[]> {
+  const domain = marketplaceSearchDomain(input.source, input.country);
+  const body = organicResponseSchema.parse(
+    await search(config, {
+      engine: "google",
+      q: `site:${domain} ${input.query}`,
+      gl: input.country.toLowerCase(),
+      hl: "en",
+      num: "10",
+    }),
+  );
+  const out: ListingCandidate[] = [];
+  for (const [i, raw] of (body.organic_results ?? []).entries()) {
+    const r = organicResultSchema.safeParse(raw);
+    if (!r.success || !r.data.link || !r.data.title) continue;
+    const url = canonicalListingUrl(r.data.link);
+    if (!url) continue;
+    const host = hostOf(url);
+    if (marketplaceFor(host)?.key !== input.source || !isMarketplaceProductPage(url)) continue;
+    const ext = {
+      ...(r.data.rich_snippet?.top?.detected_extensions ?? {}),
+      ...(r.data.rich_snippet?.bottom?.detected_extensions ?? {}),
+    };
+    const currency = currencyFromDisplay(ext.currency, input.country, input.currency);
+    out.push({
+      url,
+      host,
+      source: input.source,
+      title: r.data.title.trim().slice(0, 255),
+      price: toMoney(ext.price, currency),
+      shipping: null,
+      images: cleanImageUrls([r.data.thumbnail]),
+      rating: toRating(ext.rating),
+      reviewCount: toReviewCount(ext.reviews),
+      origin: "site",
+      position: r.data.position ?? i + 1,
+      extractable: true,
+    });
+  }
+  return out;
+}
+
+const amazonResultSchema = z.looseObject({
+  position: z.number().optional(),
+  asin: z.string().optional().nullable(),
+  title: z.string().optional().nullable(),
+  extracted_price: z.number().optional().nullable(),
+  price: z.string().optional().nullable(),
+  rating: z.unknown().optional(),
+  reviews: z.unknown().optional(),
+  thumbnail: z.string().optional().nullable(),
+});
+
+const amazonResponseSchema = z.looseObject({
+  error: z.string().optional(),
+  organic_results: z.array(z.unknown()).optional().nullable(),
+});
+
+/**
+ * Amazon search results (structured: price, rating, review count), so Amazon
+ * listings never depend on scraping its pages.
+ *
+ *   GET https://serpapi.com/search?engine=amazon&k=<query>&amazon_domain=<domain>
+ *     -> organic_results[]: position, asin, title, price, extracted_price,
+ *        rating, reviews, thumbnail, link (often a sponsored redirect: unused)
+ */
+export async function amazonCandidates(
+  config: SerpApiConfig,
+  input: { query: string; domain: string; currency: string; country: string },
+): Promise<ListingCandidate[]> {
+  const body = amazonResponseSchema.parse(
+    await search(config, { engine: "amazon", k: input.query, amazon_domain: input.domain }),
+  );
+  const host = `www.${input.domain}`;
+  const out: ListingCandidate[] = [];
+  for (const [i, raw] of (body.organic_results ?? []).entries()) {
+    const r = amazonResultSchema.safeParse(raw);
+    if (!r.success || !r.data.title || !r.data.asin || !/^[A-Z0-9]{10}$/i.test(r.data.asin)) {
+      continue;
+    }
+    const currency = currencyFromDisplay(r.data.price, input.country, input.currency);
+    out.push({
+      url: `https://${host}/dp/${r.data.asin.toUpperCase()}`,
+      host,
+      source: "amazon",
+      title: r.data.title.trim().slice(0, 255),
+      price: toMoney(r.data.extracted_price, currency),
+      shipping: null,
+      images: cleanImageUrls([r.data.thumbnail]),
+      rating: toRating(r.data.rating),
+      reviewCount: toReviewCount(r.data.reviews),
+      origin: "site",
+      position: r.data.position ?? i + 1,
+      // Structured data already: no need to scrape Amazon (often blocked).
+      extractable: false,
     });
   }
   return out;

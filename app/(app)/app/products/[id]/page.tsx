@@ -24,6 +24,7 @@ import {
 import { GateTracker } from "@/components/app/product/gate-tracker";
 import { DeleteProductButton, StepBackButton } from "@/components/app/product/product-actions";
 import { PageReview } from "@/components/app/product/page-review";
+import { PageTemplatePanel } from "@/components/app/product/page-template-panel";
 import { pagePartState } from "@/components/app/product/page-state";
 import { SupplierChoice } from "@/components/app/product/supplier-choice";
 import { STEP_LABELS, whoApproves } from "@/components/app/product-status";
@@ -45,7 +46,9 @@ import type { UserWorkspaceContext } from "@/lib/tenant/context";
 import { getPageContext } from "../../_lib/page-context";
 import {
   approvePageAction,
+  changePageTemplateAction,
   confirmProductAction,
+  listStoreTemplatesAction,
   quoteSupplierAction,
   regeneratePageCopyAction,
   rejectPageAction,
@@ -482,6 +485,7 @@ async function GateTwo({
         initialQuoteError={initialQuoteError}
         onQuote={quoteSupplierAction.bind(null, product.id)}
         onSelect={selectSupplierAction.bind(null, product.id)}
+        onListTemplates={listStoreTemplatesAction}
         onRejectAll={rejectSuppliersAction.bind(null, product.id)}
       />
     </Section>
@@ -505,6 +509,8 @@ function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role 
   const publishClaim = claim ? { ...claim, startedLabel: sinceNow(claim.startedAt) } : null;
   const canEdit = can(role, "gate:content_approval");
   const canPublish = canEdit && can(role, "page:publish");
+  const templateStore =
+    product.shopifyStores.find((s) => s.id === product.supplierChoice?.shopifyConnectionId) ?? null;
   return (
     <Section
       id="gate-3"
@@ -529,6 +535,15 @@ function GateThree({ product, role }: { product: ProductPipelineDTO; role: Role 
       }
       className={pageApproved ? undefined : "border-warning/40"}
     >
+      {product.pageTemplate && templateStore ? (
+        <PageTemplatePanel
+          template={product.pageTemplate}
+          store={templateStore}
+          canChange={canEdit && !pageApproved && !publishing}
+          onListTemplates={listStoreTemplatesAction}
+          onChange={changePageTemplateAction.bind(null, product.id)}
+        />
+      ) : null}
       {product.pageCopy ? (
         <PageReview
           copy={product.pageCopy}

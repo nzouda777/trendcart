@@ -21,6 +21,7 @@ import {
   IntegrationError,
   supplierListingSchema,
   type SupplierListing,
+  type SupplierListingInput,
 } from "@/lib/domain/contracts";
 import { approval, brand, supplierMatch } from "@/lib/db/schema";
 import type { ScopedDb } from "@/lib/tenant/scoped-db";
@@ -30,23 +31,34 @@ import { decisionOrder } from "../gate-payloads";
 
 import type { StepDefinition } from "./types";
 
-/** Listings asked from the finder (1..10). */
-export const SUPPLIER_SEARCH_LIMIT = 5;
+/** Listings asked from the finder (1..10): room for AliExpress, CJ, Amazon and the best others. */
+export const SUPPLIER_SEARCH_LIMIT = 6;
 
 /** Extra listing fields kept on supplier_match.details. */
 export type SupplierDetails = {
   variants: SupplierListing["variants"];
   matchScore: number;
+  /** Quality/price ratio, rating and review count (absent on rows stored before them). */
+  valueScore?: number;
+  rating?: number | null;
+  reviewCount?: number | null;
   /** Shipping currency when it differs from the price currency. */
   shippingCurrency?: string;
 };
 
 /** Upserts one listing on (product, url). Exported for tests and manual entries. */
-export async function upsertSupplierListing(db: ScopedDb, productId: string, raw: SupplierListing) {
+export async function upsertSupplierListing(
+  db: ScopedDb,
+  productId: string,
+  raw: SupplierListingInput,
+) {
   const listing = supplierListingSchema.parse(raw);
   const details: SupplierDetails = {
     variants: listing.variants,
     matchScore: listing.matchScore,
+    valueScore: listing.valueScore,
+    rating: listing.rating,
+    reviewCount: listing.reviewCount,
     ...(listing.shipping && listing.shipping.currency !== listing.price.currency
       ? { shippingCurrency: listing.shipping.currency }
       : {}),

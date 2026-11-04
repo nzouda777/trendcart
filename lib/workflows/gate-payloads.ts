@@ -15,6 +15,14 @@ import type { NewRow, Row, ScopedDb } from "@/lib/tenant/scoped-db";
 export const supplierChoicePayloadSchema = z.object({
   supplierMatchId: z.string().min(1),
   shopifyConnectionId: z.string().min(1),
+  /**
+   * Product template the page is built on (templates/product.<suffix>.json,
+   * null = default). Absent on choices recorded before templates were picked
+   * per page: the store's default template then applies.
+   */
+  templateSuffix: z.string().min(1).max(100).nullable().optional(),
+  /** "generate": Claude designs a template from `templateSuffix` (base). Absent = existing. */
+  templateMode: z.enum(["existing", "generate"]).optional(),
   sellingPrice: z.number().positive(),
   compareAtPrice: z.number().positive().nullable(),
   priceSource: z.enum(["pricing_rule", "default_rule", "min_margin", "manual"]),
@@ -26,11 +34,20 @@ export const supplierChoicePayloadSchema = z.object({
 });
 export type SupplierChoicePayload = z.infer<typeof supplierChoicePayloadSchema>;
 
+/** Template of a GATE 2 choice, or the store's default when the choice predates the picker. */
+export function effectiveTemplateSuffix(
+  choice: Pick<SupplierChoicePayload, "templateSuffix">,
+  storeDefault: string | null,
+): string | null {
+  return choice.templateSuffix !== undefined ? choice.templateSuffix : storeDefault;
+}
+
 /** GATE 3 decisions are per part; `kind` tells a rejection from a plain regeneration. */
 export const contentPartPayloadSchema = z
   .object({
     part: gatePartSchema,
-    kind: z.enum(["approve", "reject", "regenerate"]).optional(),
+    /** "template": the page was sent back to be rebuilt on another template. */
+    kind: z.enum(["approve", "reject", "regenerate", "template"]).optional(),
   })
   .passthrough();
 

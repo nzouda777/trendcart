@@ -7,6 +7,7 @@ import type {
   ComplianceReport,
   Gate,
   PageCopy,
+  PageTemplateChoice,
   ProductAnalysis,
   ProductStatus,
   Role,
@@ -198,6 +199,11 @@ export type SupplierDTO = {
   variants: { name: string; values: string[] }[];
   /** 0..1 similarity with the analysed product. */
   matchScore: number;
+  /** 0..1 quality/price ratio (null on listings found before it was computed). */
+  valueScore: number | null;
+  /** Rating out of 5 and review count printed on the listing. */
+  rating: number | null;
+  reviewCount: number | null;
   selected: boolean;
   createdAt: ISODate;
 };
@@ -249,6 +255,8 @@ export type ShopifyStoreOptionDTO = {
   shopDomain: string;
   status: ConnectionStatus;
   templateSuffix: string | null;
+  /** Granted write_themes: Claude-designed templates can be written to its theme. */
+  canWriteThemes: boolean;
 };
 
 export type ProductPipelineDTO = ProductDetailDTO & {
@@ -261,11 +269,15 @@ export type ProductPipelineDTO = ProductDetailDTO & {
     approvalId: string;
     supplierMatchId: string;
     shopifyConnectionId: string;
+    /** Product template the page is built on (null = product.json). */
+    templateSuffix: string | null;
     fxRate: number | null;
     warnings: string[];
   } | null;
   /** The brand's Shopify stores (GATE 2 store picker). */
   shopifyStores: ShopifyStoreOptionDTO[];
+  /** Template the page is built on (after GATE 2); generated sections once written. */
+  pageTemplate: PageTemplateChoice | null;
   pageCopy: PageCopy | null;
   pageCopyGeneratedAt: ISODate | null;
   /**

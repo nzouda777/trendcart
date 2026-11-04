@@ -210,7 +210,9 @@ Firecrawl costs are recorded in `usage_monthly` with the AI costs.
 Writes the product page in the brand language: title, description, highlights, FAQ, guarantee,
 ad texts and SEO.
 
-1. Create a key in the Anthropic Console and set `ANTHROPIC_API_KEY`.
+1. Create a key in the Anthropic Console and set `ANTHROPIC_API_KEY`. Prefer a key created inside
+   a workspace. A key that is not scoped to a workspace also needs `ANTHROPIC_WORKSPACE_ID`
+   (sent as the `anthropic-workspace-id` header), or Anthropic answers 400.
 2. Default model `claude-opus-5-5`. Override it with `AI_COPYWRITING_MODEL`. Prices are in
    `lib/ai/pricing.ts`. An unknown model is counted at a deliberately high fallback price.
 3. Copy that breaks the copy-safety rules is regenerated once, then the call fails (see

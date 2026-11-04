@@ -2,6 +2,9 @@
  * Step "build": GATE 2 choice → page copy → Shopify draft
  * (building_page_and_videos → awaiting_content_approval, GATE 3).
  *
+ * 0. Template: the product template chosen at GATE 2 is read from the store's
+ *    live theme (sections, blocks and the text metafields they render), so
+ *    the copy fills its slots (PageCopy.templateFields → product metafields).
  * 1. Page copy: Copywriter.writePage through `metered`, validated with
  *    pageCopySchema, checked with the copy-safety guard (unsafe copy fails
  *    the step, retryable, and is neither stored nor pushed), and stored on
@@ -31,19 +34,28 @@ import {
   type CopyHint,
   type Integrations,
   type PageCopy,
+  type PageTemplateChoice,
+  type ProductTemplateStructure,
   type ShopifyProductRef,
   type SupplierListing,
 } from "@/lib/domain/contracts";
 import { findUnsafeClaims } from "@/lib/ai/copy-safety";
 import { approval, brand, product, shopifyProduct, supplierMatch } from "@/lib/db/schema";
 import { draftProductInputFromPageCopy } from "@/lib/integrations/shopify";
+import { imageFilename } from "@/lib/integrations/shopify/product-input";
 import { getShopifyCredentialsFor } from "@/lib/services/internal/credentials";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
 
 import { buildCallContext } from "../call-context";
+import {
+  generatedTemplateSuffix,
+  buildGeneratedTemplate,
+} from "@/lib/integrations/shopify/template-builder";
+
 import { decisionOrder, loadSupplierChoice, type SupplierChoicePayload } from "../gate-payloads";
-import { draftImageUrls, safeVariantGroups, variantsFromListing } from "../page-input";
+import { draftTemplateSuffix, resolvePageTemplate, templateLabel } from "../page-template";
+import { isUnsafeText, pageImageUrls, safeVariantGroups, variantsFromListing } from "../page-input";
 import type { SupplierDetails } from "./source";
 
 import type { StepDefinition, StepEnv } from "./types";
@@ -91,6 +103,9 @@ export function listingFromSupplierRow(row: SupplierRow): SupplierListing {
     images: row.images,
     variants: details.variants ?? [],
     matchScore: details.matchScore ?? 0,
+    rating: details.rating ?? null,
+    reviewCount: details.reviewCount ?? null,
+    valueScore: details.valueScore ?? 0,
   });
 }
 
@@ -129,7 +144,10 @@ export async function loadCopyHint(db: ScopedDb, productId: string): Promise<Cop
     ),
     orderBy: decisionOrder,
   });
-  const pageRejections = rows.filter((r) => r.payload?.part === "page");
+  // A template change is not a verdict on the copy: it does not steer the next one.
+  const pageRejections = rows.filter(
+    (r) => r.payload?.part === "page" && r.payload?.kind !== "template",
+  );
   if (pageRejections.length === 0) return null;
 
   const notes = pageRejections.map((r) => r.note?.trim()).filter((n): n is string => !!n);
@@ -149,6 +167,7 @@ export async function writePageCopy(
   env: Pick<StepEnv, "ctx" | "integrations" | "metered">,
   row: ProductRow,
   supplier: SupplierRow | null,
+  template: ProductTemplateStructure | null = null,
 ): Promise<PageCopy> {
   if (!row.analysis) fatal("The product has no analysis yet.");
   const brandRow = await env.ctx.db.getById(brand, row.brandId);
@@ -161,9 +180,125 @@ export async function writePageCopy(
       language: brandRow.language,
       brandName: brandRow.name,
       ...(hint ? { hint } : {}),
+      ...(template && template.slots.length > 0
+        ? { template: { outline: template.outline, slots: template.slots } }
+        : {}),
     }),
   );
   return pageCopySchema.parse(result.data);
+}
+
+/**
+ * Structure of the template chosen at GATE 2 (read from the store's live
+ * theme), so the copy follows its sections. A template removed from the theme
+ * meanwhile fails the step without retry: go back to GATE 2 and pick another.
+ */
+export async function loadChosenTemplate(
+  ctx: WorkspaceContext,
+  integrations: Integrations,
+  row: ProductRow,
+  choice: SupplierChoicePayload,
+): Promise<ProductTemplateStructure | null> {
+  const { creds, templateSuffix: storeDefault } = await getShopifyCredentialsFor(
+    ctx,
+    integrations,
+    choice.shopifyConnectionId,
+  );
+  const t = resolvePageTemplate(row, choice, storeDefault);
+  // A generated template has no metafield slots: Claude writes its sections' text.
+  if (t.mode === "generate") return null;
+  try {
+    return await integrations.shopify.getProductTemplateStructure(creds, t.suffix);
+  } catch (error) {
+    if (error instanceof IntegrationError && error.code === "not_found") {
+      fatal(
+        `The template ${templateLabel(t.suffix)} is no longer in the store's theme. Choose another template.`,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * "generate" mode: Claude designs a CRO page from the theme's sections (one
+ * metered call), the template is built and validated against the section
+ * schemas (unsafe text dropped), written to the live theme as
+ * templates/product.tc-<product id>.json (same file on every rebuild), and
+ * recorded on product.page_template.generated. Returns the updated row.
+ */
+export async function generatePageTemplate(
+  env: Pick<StepEnv, "ctx" | "integrations" | "metered" | "now">,
+  row: ProductRow,
+  input: { choice: SupplierChoicePayload; supplier: SupplierRow; copy: PageCopy },
+): Promise<ProductRow> {
+  const { ctx, integrations } = env;
+  const { choice, copy } = input;
+  if (!row.analysis) fatal("The product has no analysis yet.");
+  // The draft first: its handle is the target of the page buttons, and its
+  // photos (uploaded to the store) are what image sections show.
+  const draft = await syncShopifyDraft(ctx, integrations, row, input);
+  const { creds, templateSuffix: storeDefault } = await getShopifyCredentialsFor(
+    ctx,
+    integrations,
+    choice.shopifyConnectionId,
+  );
+  const t = resolvePageTemplate(row, choice, storeDefault);
+  let design: Awaited<ReturnType<Integrations["shopify"]["getTemplateDesignContext"]>>;
+  try {
+    design = await integrations.shopify.getTemplateDesignContext(creds, t.suffix);
+  } catch (error) {
+    if (error instanceof IntegrationError && error.code === "not_found") {
+      fatal(`The base template ${templateLabel(t.suffix)} is no longer in the store's theme.`);
+    }
+    throw error;
+  }
+  const brandRow = await ctx.db.getById(brand, row.brandId);
+  const call = await buildCallContext(ctx.db, row.brandId);
+  const result = await env.metered(() =>
+    integrations.copywriter.designTemplate(call, {
+      analysis: row.analysis!,
+      copy,
+      language: brandRow.language,
+      brandName: brandRow.name,
+      sections: design.sections,
+      mainSection: design.mainSection,
+      colorSchemes: design.colorSchemes,
+      imageUrls: draft.imageUrls,
+      withImages: t.withImages,
+    }),
+  );
+
+  let built: ReturnType<typeof buildGeneratedTemplate>;
+  try {
+    built = buildGeneratedTemplate(design.base, result.data, design.sections, isUnsafeText, {
+      mainSection: design.mainSection,
+      context: {
+        productHandle: draft.ref.handle,
+        colorSchemes: design.colorSchemes.map((c) => c.id),
+        // Product photos as theme image references (the files Trendcart uploaded).
+        images: t.withImages
+          ? draft.imageUrls.map((url) => `shopify://shop_images/${imageFilename(url)}`)
+          : null,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid template.";
+    // No main product section in the base: retrying cannot help. An unusable plan can.
+    throw new IntegrationError("workflow", "invalid_input", message, {
+      retryable: !/main product section/.test(message),
+    });
+  }
+  const suffix = generatedTemplateSuffix(row.id);
+  await integrations.shopify.upsertProductTemplate(creds, { suffix, template: built.template });
+
+  const pageTemplate: PageTemplateChoice = {
+    ...t,
+    generated: { suffix, sections: built.sections, generatedAt: env.now().toISOString() },
+  };
+  const [saved] = await ctx.db.update(product, { pageTemplate }, (p) =>
+    and(eq(p.id, row.id), eq(p.status, row.status)),
+  );
+  return saved ?? { ...row, pageTemplate };
 }
 
 /**
@@ -192,14 +327,20 @@ export async function syncShopifyDraft(
   integrations: Integrations,
   row: ProductRow,
   input: { choice: SupplierChoicePayload; supplier: SupplierRow; copy: PageCopy },
-): Promise<{ ref: ShopifyProductRef; shopifyProduct: Row<typeof shopifyProduct> }> {
+): Promise<{
+  ref: ShopifyProductRef;
+  shopifyProduct: Row<typeof shopifyProduct>;
+  /** The gallery sent to Shopify (supplier photo URLs). */
+  imageUrls: string[];
+}> {
   const { choice, supplier, copy } = input;
   const brandRow = await ctx.db.getById(brand, row.brandId);
-  const { creds, templateSuffix } = await getShopifyCredentialsFor(
+  const { creds, templateSuffix: storeDefault } = await getShopifyCredentialsFor(
     ctx,
     integrations,
     choice.shopifyConnectionId,
   );
+  const templateSuffix = draftTemplateSuffix(resolvePageTemplate(row, choice, storeDefault));
   const listing = listingFromSupplierRow(supplier);
   const price = row.sellingPrice ?? choice.sellingPrice;
   const compareAt = row.compareAtPrice ?? choice.compareAtPrice;
@@ -208,6 +349,22 @@ export async function syncShopifyDraft(
     price,
     compareAt,
   );
+
+  // Photos of the other listings of this product top up a short gallery.
+  const others = await ctx.db.select(supplierMatch, {
+    where: eq(supplierMatch.productId, row.id),
+    orderBy: (t) => t.createdAt,
+  });
+  const imageUrls = pageImageUrls({
+    selected: listing.images,
+    referenceImageUrl: row.analysis?.referenceImageUrl,
+    others: others
+      .filter((o) => o.id !== supplier.id)
+      .map((o) => ({
+        images: o.images,
+        matchScore: ((o.details ?? {}) as Partial<SupplierDetails>).matchScore ?? 0,
+      })),
+  });
 
   await integrations.shopify.ensureMetafieldDefinitions(creds);
   const ref = await integrations.shopify.createDraftProduct(
@@ -218,7 +375,7 @@ export async function syncShopifyDraft(
       templateSuffix,
       options,
       variants,
-      imageUrls: draftImageUrls(listing.images, [row.analysis?.referenceImageUrl]),
+      imageUrls,
       vendor: brandRow.name,
       productType: row.analysis?.category,
       tags: ["trendcart"],
@@ -230,7 +387,7 @@ export async function syncShopifyDraft(
     { productId: row.id, connectionId: choice.shopifyConnectionId, ...fields },
     { target: (t) => [t.productId, t.connectionId], set: fields },
   );
-  return { ref, shopifyProduct: saved };
+  return { ref, shopifyProduct: saved, imageUrls };
 }
 
 export const buildStep: StepDefinition = {
@@ -250,17 +407,30 @@ export const buildStep: StepDefinition = {
       );
       assertSafeCopy(copy);
     }
+    let current = row;
     if (!copy) {
-      copy = await writePageCopy(env, row, supplier);
+      const template = await loadChosenTemplate(ctx, integrations, row, choice);
+      copy = await writePageCopy(env, row, supplier, template);
       // Never stored nor pushed when unsafe: the retry pays for a new copy.
       assertSafeCopy(copy);
-      // Stored now (status unchanged) so a Shopify retry reuses it.
-      await ctx.db.update(product, { pageCopy: copy, pageCopyGeneratedAt: now() }, (p) =>
-        and(eq(p.id, row.id), eq(p.status, row.status)),
+      // Stored now (status unchanged) so a Shopify retry reuses it. A new copy
+      // also means a new generated template (designed from this copy).
+      const pageTemplate = row.pageTemplate ? { ...row.pageTemplate, generated: null } : null;
+      const [saved] = await ctx.db.update(
+        product,
+        { pageCopy: copy, pageCopyGeneratedAt: now(), pageTemplate },
+        (p) => and(eq(p.id, row.id), eq(p.status, row.status)),
       );
+      current = saved ?? { ...row, pageCopy: copy, pageTemplate };
     }
 
-    await syncShopifyDraft(ctx, integrations, row, { choice, supplier, copy });
+    // Separate from the copy (stored above), so a retry after a design or theme
+    // failure does not pay for the copy again.
+    if (current.pageTemplate?.mode === "generate" && !current.pageTemplate.generated) {
+      current = await generatePageTemplate(env, current, { choice, supplier, copy });
+    }
+
+    await syncShopifyDraft(ctx, integrations, current, { choice, supplier, copy });
     return {};
   },
 };

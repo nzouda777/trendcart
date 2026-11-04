@@ -4,7 +4,8 @@
  *
  * Idempotency (see createDraftProduct in ./live):
  * - `idempotencyKey` is written to the `trendcart.product_id` custom ID
- *   metafield and used as the productSet identifier, so a re-run upserts.
+ *   metafield; the live adapter looks the product up by it first, so a re-run
+ *   updates the same product (productSet `id` identifier).
  * - On update, existing variants are matched by their option values and keep
  *   their ids; existing Trendcart images are matched by a deterministic
  *   filename (`tc-<sha256(url)[0..16]>.<ext>`) and kept by id, so Shopify does
@@ -22,7 +23,9 @@ import { createHash } from "node:crypto";
 import { sanitizeDescriptionHtml } from "@/lib/ai";
 import {
   shopifyDraftProductInputSchema,
+  TEMPLATE_FIELD_MAX,
   type PageCopy,
+  type PageTemplateField,
   type ShopifyDraftProductInput,
 } from "@/lib/domain/contracts";
 
@@ -54,25 +57,28 @@ export type ExistingProduct = {
 
 /* --------------------------------- Images --------------------------------- */
 
-const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "heic"]);
 const MARKER = /(?:^|\/)tc-([0-9a-f]{16})[^/]*$/;
 
 export function imageMarker(url: string): string {
   return createHash("sha256").update(url).digest("hex").slice(0, 16);
 }
 
-/** Deterministic filename for a source image, keeping the source's extension. */
+/**
+ * Deterministic filename for a source image. Shopify requires the extension to
+ * match the source URL's exactly ("Provided filename extension must match
+ * original source"), so it is copied verbatim (no jpeg→jpg, no case change,
+ * no default): a source without an extension gets a filename without one.
+ */
 export function imageFilename(url: string): string {
-  let ext = "jpg";
+  let ext = "";
   try {
-    const match = /\.([a-z0-9]+)$/i.exec(new URL(url).pathname);
-    const candidate = match?.[1]?.toLowerCase();
-    if (candidate && IMAGE_EXTENSIONS.has(candidate))
-      ext = candidate === "jpeg" ? "jpg" : candidate;
+    const last = new URL(url).pathname.split("/").pop() ?? "";
+    const match = /\.([A-Za-z0-9]+)$/.exec(last);
+    if (match) ext = `.${match[1]}`;
   } catch {
-    // Validated as a URL by the schema; keep the default.
+    // Validated as a URL by the schema; no extension.
   }
-  return `tc-${imageMarker(url)}.${ext}`;
+  return `tc-${imageMarker(url)}${ext}`;
 }
 
 /** Marker from a Shopify CDN URL created by imageFilename (Shopify may append _<uuid>). */
@@ -330,8 +336,8 @@ export type ProductSetVariables = {
 
 /**
  * Variables for `productSet`. With `existing`, the call updates that product
- * (status untouched, handle untouched); without, it creates a DRAFT, upserting
- * on the custom ID when `idempotencyKey` is set.
+ * (status untouched, handle untouched); without, it creates a DRAFT carrying
+ * the custom ID metafield when `idempotencyKey` is set.
  */
 export function buildProductSetVariables(
   input: ShopifyDraftProductInput,
@@ -417,6 +423,15 @@ export function buildProductSetVariables(
       value: p.metafields.guarantee.trim(),
     });
   }
+  // Template slots: never our own keys (sent above), first one wins on duplicates.
+  const taken = new Set(metafields.map((m) => `${m.namespace}.${m.key}`));
+  for (const m of p.extraMetafields) {
+    const ref = `${m.namespace}.${m.key}`;
+    if (taken.has(ref) || m.namespace === SHOPIFY_PRODUCT_ID_METAFIELD.namespace) continue;
+    if (["custom.highlights", "custom.faq", "custom.guarantee"].includes(ref)) continue;
+    taken.add(ref);
+    metafields.push({ namespace: m.namespace, key: m.key, type: m.type, value: m.value });
+  }
   // productSet replaces the metafield list: always resend the custom ID.
   if (p.idempotencyKey) {
     metafields.push({
@@ -447,17 +462,12 @@ export function buildProductSetVariables(
     ...(existing ? {} : { status: "DRAFT" }),
   };
 
-  const identifier: ProductSetVariables["identifier"] = existing
-    ? { id: existing.id }
-    : p.idempotencyKey
-      ? {
-          customId: {
-            namespace: SHOPIFY_PRODUCT_ID_METAFIELD.namespace,
-            key: SHOPIFY_PRODUCT_ID_METAFIELD.key,
-            value: p.idempotencyKey,
-          },
-        }
-      : undefined;
+  // No `customId` identifier on creation: Shopify rejects it together with a
+  // `metafields` list ("metafields must contain the customId value"), even when
+  // the list carries it. The caller already looked the product up by custom ID,
+  // and the `id`-type metafield is unique per store, so a concurrent duplicate
+  // create fails with a userError instead of creating a second product.
+  const identifier: ProductSetVariables["identifier"] = existing ? { id: existing.id } : undefined;
 
   return { ...(identifier ? { identifier } : {}), input: productInput, synchronous: true };
 }
@@ -499,5 +509,65 @@ export function draftProductInputFromPageCopy(input: {
       faq: input.copy.faq,
       guarantee: input.copy.guarantee,
     },
+    extraMetafields: templateFieldsToMetafields(input.copy.templateFields ?? []),
   });
+}
+
+/** Single-line metafield limit we write (Shopify's own limit is higher). */
+const SLOT_LINE_MAX = 255;
+const SLOT_LIST_MAX_ITEMS = 20;
+
+/** Paragraphs of a plain-text field (blank lines separate them). */
+function paragraphs(value: string): string[] {
+  return value
+    .split(/\n\s*\n/)
+    .map((p) => plainText(p.replace(/\s*\n\s*/g, " "), TEMPLATE_FIELD_MAX))
+    .filter(Boolean);
+}
+
+/**
+ * Pure: page copy template fields → product metafields in Shopify's value
+ * format for their type (plain text, a JSON list, or rich-text JSON). Text is
+ * cleaned like every other field (no HTML); a field emptied by cleaning is
+ * dropped.
+ */
+export function templateFieldsToMetafields(
+  fields: readonly PageTemplateField[],
+): NonNullable<ShopifyDraftProductInput["extraMetafields"]> {
+  const out: NonNullable<ShopifyDraftProductInput["extraMetafields"]> = [];
+  for (const f of fields) {
+    let value = "";
+    switch (f.type) {
+      case "single_line_text_field":
+        value = plainText(f.value.replace(/\s*\n\s*/g, " "), SLOT_LINE_MAX);
+        break;
+      case "multi_line_text_field":
+        value = paragraphs(f.value).join("\n\n");
+        break;
+      case "list.single_line_text_field": {
+        const items = f.value
+          .split("\n")
+          .map((line) => plainText(line.replace(/^\s*[-•*]\s*/, ""), SLOT_LINE_MAX))
+          .filter(Boolean)
+          .slice(0, SLOT_LIST_MAX_ITEMS);
+        value = items.length ? JSON.stringify(items) : "";
+        break;
+      }
+      case "rich_text_field": {
+        const paras = paragraphs(f.value);
+        value = paras.length
+          ? JSON.stringify({
+              type: "root",
+              children: paras.map((text) => ({
+                type: "paragraph",
+                children: [{ type: "text", value: text }],
+              })),
+            })
+          : "";
+        break;
+      }
+    }
+    if (value) out.push({ namespace: f.namespace, key: f.key, type: f.type, value });
+  }
+  return out;
 }

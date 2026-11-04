@@ -111,10 +111,13 @@ describe("M2 demo (mock mode)", () => {
     expect(at2.shopifyStores).toEqual([
       expect.objectContaining({ id: connectionId, shopDomain: SHOP, status: "active" }),
     ]);
-    // Viewers read suppliers, ranked best first.
+    // Viewers read suppliers, best value for money first, AliExpress, CJ and Amazon always in.
     const list = await listSuppliers(w.a.viewer, productId);
-    expect(list.map((s) => s.matchScore)).toEqual(
-      [...list.map((s) => s.matchScore)].sort((x, y) => y - x),
+    expect(list.map((s) => s.valueScore)).toEqual(
+      [...list.map((s) => s.valueScore)].sort((x, y) => y! - x!),
+    );
+    expect(list.map((s) => s.source)).toEqual(
+      expect.arrayContaining(["aliexpress", "cjdropshipping", "amazon"]),
     );
     expect(await w.a.owner.db.count(shopifyProduct)).toBe(0);
     expect(shopifyCalls.filter((c) => c.method === "createDraftProduct")).toHaveLength(0);

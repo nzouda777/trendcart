@@ -113,8 +113,22 @@ describe("mock Shopify client: contract conformance", () => {
   it("shop info, templates and metafields parse with the contract", async () => {
     const client = mock();
     shopifyShopInfoSchema.parse(await client.getShopInfo(creds));
-    expect(await client.listProductTemplates(creds)).toEqual([null, "trendcart"]);
+    expect(await client.listProductTemplates(creds)).toEqual([null, "landing", "trendcart"]);
     await expect(client.ensureMetafieldDefinitions(creds)).resolves.toBeUndefined();
+  });
+
+  it("describes the landing template's slots from its dynamic sources", async () => {
+    const structure = await mock().getProductTemplateStructure(creds, "landing");
+    expect(structure.slots.map((s) => [`${s.namespace}.${s.key}`, s.type])).toEqual([
+      ["custom.tagline", "single_line_text_field"],
+      ["custom.how_to_use", "rich_text_field"],
+      ["custom.in_the_box", "list.single_line_text_field"],
+    ]);
+    expect(structure.slots[1]!.context).toContain("How to use it");
+    expect((await mock().getProductTemplateStructure(creds, "trendcart")).slots).toEqual([]);
+    await expect(mock().getProductTemplateStructure(creds, "gone")).rejects.toMatchObject({
+      code: "not_found",
+    });
   });
 
   it("creates a deterministic DRAFT product, attaches a READY video, publishes and deletes", async () => {

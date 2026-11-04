@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 /**
  * SupplierFinder: pure ranking helpers, SerpApi/Firecrawl mapping and the
  * live pipeline against a fake network (no real API is ever called).
@@ -17,6 +18,7 @@ import { createSupplierFinder } from ".";
 import { createExclusionFilter, listingExclusionKey } from "./exclude";
 import { listingExtractionJsonSchema, normalizeExtraction } from "./firecrawl";
 import { createLiveSupplierFinder, toListing } from "./live";
+import { aliExpressSign } from "./marketplaces";
 import {
   canonicalListingUrl,
   cleanImageUrls,
@@ -153,6 +155,8 @@ const cand = (over: Partial<ListingCandidate>): ListingCandidate => ({
   price: { amount: 5, currency: "USD" },
   shipping: null,
   images: [],
+  rating: null,
+  reviewCount: null,
   origin: "lens",
   position: 1,
   extractable: true,
@@ -230,6 +234,8 @@ describe("Firecrawl extraction normalization", () => {
           { name: "Color", values: ["Red", "Red", "", "Rainbow"] },
           { name: "", values: ["x"] },
         ],
+        rating: "4,7",
+        reviewCount: "2.3K",
       },
       "EUR",
     )!;
@@ -240,6 +246,8 @@ describe("Firecrawl extraction normalization", () => {
       leadTimeDays: { min: 8, max: 15 },
       images: ["https://ae01.alicdn.com/kf/a.jpg"],
       variants: [{ name: "Color", values: ["Red", "Rainbow"] }],
+      rating: 4.7,
+      reviewCount: 2300,
     });
   });
 
@@ -356,6 +364,7 @@ function fakeNetwork(
   opts: {
     lens?: () => Response;
     shopping?: () => Response;
+    google?: (q: string) => Response;
     firecrawl?: (url: string) => Response;
   } = {},
 ) {
@@ -371,6 +380,7 @@ function fakeNetwork(
       const engine = url.searchParams.get("engine");
       if (engine === "google_lens") return opts.lens?.() ?? Response.json(LENS);
       if (engine === "google_shopping") return opts.shopping?.() ?? Response.json(SHOPPING);
+      if (engine === "google" && opts.google) return opts.google(url.searchParams.get("q") ?? "");
     }
     if (url.href === `${FC}/v2/scrape`) {
       const target = String(body?.url);
@@ -392,6 +402,8 @@ const finderFor = (net: ReturnType<typeof fakeNetwork>) =>
     firecrawlApiKey: "fc-key",
     serpApiBaseUrl: SERP,
     firecrawlBaseUrl: FC,
+    cj: null,
+    aliexpress: null,
   });
 
 const ctx = { workspaceId: "ws_live" };
@@ -662,5 +674,223 @@ describe("mock SupplierFinder", () => {
     const all = [...rejected, ...next.data.map((l) => l.url)];
     const third = await finder.find(ctx, { ...input, excludeUrls: all });
     expect(third.data.some((l) => all.includes(l.url))).toBe(false);
+  });
+});
+
+describe("required marketplaces", () => {
+  const AMAZON = {
+    organic_results: [
+      {
+        position: 1,
+        asin: "B0SUNSET01",
+        title: "Sunset Projection Lamp, 16 Colors LED",
+        price: "$18.99",
+        extracted_price: 18.99,
+        rating: 4.4,
+        reviews: 2210,
+        thumbnail: "https://m.media-amazon.com/images/I/71sun._AC_UL320_.jpg",
+        link: "https://www.amazon.com/sspa/click?ie=UTF8&spc=x",
+      },
+    ],
+  };
+  const CJ_LIST = {
+    code: 200,
+    result: true,
+    data: {
+      content: [
+        {
+          productList: [
+            {
+              id: "CJ123",
+              nameEn: "Sunset Projection Lamp LED Night Light",
+              bigImage: "https://cf.cjdropshipping.com/a.jpg",
+              sellPrice: "5.10 -- 6.20",
+              nowPrice: "",
+              deliveryCycle: "6-12",
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const ALI = {
+    aliexpress_affiliate_product_query_response: {
+      resp_result: {
+        resp_code: 200,
+        result: {
+          products: {
+            product: [
+              {
+                product_id: 1005006123456789,
+                product_title: "LED Sunset Projection Lamp Rainbow",
+                product_main_image_url: "https://ae01.alicdn.com/kf/main.jpg",
+                product_small_image_urls: { string: ["https://ae01.alicdn.com/kf/2.jpg"] },
+                target_sale_price: "4.79",
+                target_sale_price_currency: "EUR",
+                evaluate_rate: "96.0%",
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+
+  function apiNetwork() {
+    const base = fakeNetwork({
+      lens: () => Response.json({ visual_matches: [] }),
+      shopping: () => Response.json({ shopping_results: [] }),
+    });
+    const fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.searchParams.get("engine") === "amazon") {
+        base.calls.push({ url, init, body: undefined });
+        return Response.json(AMAZON);
+      }
+      if (url.hostname === "cj.test") {
+        base.calls.push({ url, init, body: undefined });
+        if (url.pathname.endsWith("/getAccessToken")) {
+          return Response.json({ code: 200, result: true, data: { accessToken: "tok" } });
+        }
+        if (url.pathname.endsWith("/product/listV2")) return Response.json(CJ_LIST);
+        return Response.json({
+          code: 200,
+          result: true,
+          data: {
+            productImageSet: [
+              "https://cf.cjdropshipping.com/a.jpg",
+              "https://cf.cjdropshipping.com/b.jpg",
+            ],
+          },
+        });
+      }
+      if (url.hostname === "ali.test") {
+        base.calls.push({ url, init, body: undefined });
+        return Response.json(ALI);
+      }
+      return base.fetch(input, init);
+    }) as unknown as HttpFetch;
+    return { fetch, calls: base.calls };
+  }
+
+  it("uses the official APIs, prices in EUR for EUR brands, and shortlists the three marketplaces", async () => {
+    const net = apiNetwork();
+    const finder = createLiveSupplierFinder({
+      fetch: net.fetch,
+      serpApiKey: "serp-key",
+      firecrawlApiKey: "fc-key",
+      serpApiBaseUrl: SERP,
+      firecrawlBaseUrl: FC,
+      cj: { apiKey: "CJ@api@k", fetch: net.fetch, baseUrl: "https://cj.test/api2.0/v1" },
+      aliexpress: {
+        appKey: "ak",
+        appSecret: "secret",
+        trackingId: "tc",
+        fetch: net.fetch,
+        baseUrl: "https://ali.test/sync",
+        now: () => 1_700_000_000_000,
+      },
+    });
+    const { data, usage } = await finder.find(ctx, {
+      imageUrl: IMAGE,
+      keywords: KEYWORDS,
+      country: "FR",
+      currency: "EUR",
+      limit: 3,
+    });
+
+    expect(data.map((l) => l.source).sort()).toEqual(["aliexpress", "amazon", "cjdropshipping"]);
+    // EUR brand: Amazon France and AliExpress in EUR; CJ only sells in USD (kept).
+    const amazon = net.calls.find((c) => c.url.searchParams.get("engine") === "amazon")!;
+    expect(amazon.url.searchParams.get("amazon_domain")).toBe("amazon.fr");
+    const ali = net.calls.find((c) => c.url.hostname === "ali.test")!;
+    expect(ali.url.searchParams.get("target_currency")).toBe("EUR");
+    expect(ali.url.searchParams.get("sign")).toMatch(/^[0-9A-F]{64}$/);
+    expect(data.find((l) => l.source === "aliexpress")).toMatchObject({
+      url: "https://www.aliexpress.com/item/1005006123456789.html",
+      price: { amount: 4.79, currency: "EUR" },
+      rating: 4.8,
+    });
+    expect(data.find((l) => l.source === "cjdropshipping")).toMatchObject({
+      price: { amount: 5.1, currency: "USD" },
+      leadTimeDays: { min: 6, max: 12 },
+      images: ["https://cf.cjdropshipping.com/a.jpg", "https://cf.cjdropshipping.com/b.jpg"],
+    });
+    expect(data.find((l) => l.source === "amazon")).toMatchObject({
+      url: "https://www.amazon.fr/dp/B0SUNSET01",
+      rating: 4.4,
+      reviewCount: 2210,
+    });
+    expect(data.every((l) => ["USD", "EUR"].includes(l.price.currency))).toBe(true);
+    // Nothing scraped: the APIs return structured offers.
+    expect(net.calls.some((c) => c.url.href === `${FC}/v2/scrape`)).toBe(false);
+    expect(usage).toContainEqual({ provider: "serpapi", model: "amazon", costUsd: 0.015 });
+  });
+
+  it("falls back to a Google search on the marketplace without API credentials", async () => {
+    const net = fakeNetwork({
+      google: (q) =>
+        Response.json({
+          organic_results: q.startsWith("site:cjdropshipping.com")
+            ? [
+                {
+                  position: 1,
+                  title: "CJ category: lamps",
+                  link: "https://cjdropshipping.com/list/lamps",
+                },
+                {
+                  position: 2,
+                  title: "Sunset Projection Lamp LED 16 colors",
+                  link: "https://cjdropshipping.com/product/sunset-projection-lamp-p-1234.html?from=x",
+                  rich_snippet: {
+                    bottom: {
+                      detected_extensions: {
+                        price: 6.1,
+                        currency: "USD",
+                        rating: 4.5,
+                        reviews: 88,
+                      },
+                    },
+                  },
+                },
+              ]
+            : [],
+        }),
+    });
+    const finder = createLiveSupplierFinder({
+      fetch: net.fetch,
+      serpApiKey: "serp-key",
+      firecrawlApiKey: "fc-key",
+      serpApiBaseUrl: SERP,
+      firecrawlBaseUrl: FC,
+      cj: null,
+      aliexpress: null,
+    });
+    const { data } = await finder.find(ctx, {
+      imageUrl: IMAGE,
+      keywords: KEYWORDS,
+      country: "us",
+      currency: "usd",
+      limit: 2,
+    });
+    const google = net.calls.filter((c) => c.url.searchParams.get("engine") === "google");
+    expect(google.map((c) => c.url.searchParams.get("q")).sort()).toEqual([
+      "site:aliexpress.com sunset projection lamp",
+      "site:cjdropshipping.com sunset projection lamp",
+    ]);
+    expect(data.find((l) => l.source === "cjdropshipping")).toMatchObject({
+      url: "https://cjdropshipping.com/product/sunset-projection-lamp-p-1234.html",
+      price: { amount: 6.1, currency: "USD" },
+      rating: 4.5,
+      reviewCount: 88,
+    });
+    const values = data.map((l) => l.valueScore);
+    expect(values).toEqual([...values].sort((a, b) => b - a));
+  });
+
+  it("signs AliExpress requests like the IOP SDK", () => {
+    expect(aliExpressSign("secret", { b: "2", a: "1" })).toBe(
+      createHmac("sha256", "secret").update("a1b2").digest("hex").toUpperCase(),
+    );
   });
 });

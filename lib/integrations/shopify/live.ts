@@ -3,6 +3,8 @@ import "server-only";
 import { timingSafeEqual } from "node:crypto";
 
 import {
+  IntegrationError,
+  productTemplateStructureSchema,
   shopDomainSchema,
   shopifyShopInfoSchema,
   type OAuthStart,
@@ -15,6 +17,7 @@ import {
   ENSURED_METAFIELD_DEFINITIONS,
   ONLINE_STORE_APP_HANDLE,
   readShopifyEnv,
+  requestedShopifyScopes,
   SHOPIFY_PRODUCT_ID_METAFIELD,
   SHOPIFY_SCOPES,
   type ShopifyMetafieldDefinitionSpec,
@@ -29,6 +32,13 @@ import {
 } from "./graphql";
 import { isValidShopDomain, verifyOAuthQuery, verifyWebhookBody } from "./hmac";
 import { buildProductSetVariables, parseDraftInput, type ExistingProduct } from "./product-input";
+import {
+  colorSchemesFromSettings,
+  isGeneratedTemplateSuffix,
+  isMainProductSection,
+  parseMainSectionSchema,
+  sectionCatalog,
+} from "./template-builder";
 import {
   assertMediaGids,
   assertProductGid,
@@ -51,7 +61,13 @@ import {
   type PublicationsData,
   type PublishData,
 } from "./product-operations";
-import { parseTemplateSuffixes } from "./templates";
+import {
+  buildTemplateStructure,
+  parseTemplateJson,
+  parseTemplateSuffixes,
+  templateFilename,
+  type MetafieldDefinitionInfo,
+} from "./templates";
 import {
   missingScopes,
   tokenFromResponse,
@@ -121,6 +137,102 @@ export const PRODUCT_TEMPLATES_QUERY = /* GraphQL */ `
   }
 `;
 
+/** One template file of the live theme (body as text). */
+export const PRODUCT_TEMPLATE_FILE_QUERY = /* GraphQL */ `
+  query TrendcartProductTemplateFile($filename: String!) {
+    themes(first: 1, roles: [MAIN]) {
+      nodes {
+        id
+        files(first: 1, filenames: [$filename]) {
+          nodes {
+            filename
+            body {
+              ... on OnlineStoreThemeFileBodyText {
+                content
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/** Section files of the live theme with their source (for their {% schema %}). */
+export const THEME_SECTION_FILES_QUERY = /* GraphQL */ `
+  query TrendcartThemeSectionFiles($after: String) {
+    themes(first: 1, roles: [MAIN]) {
+      nodes {
+        id
+        files(first: 25, after: $after, filenames: ["sections/*.liquid"]) {
+          nodes {
+            filename
+            body {
+              ... on OnlineStoreThemeFileBodyText {
+                content
+              }
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+`;
+
+export const MAIN_THEME_ID_QUERY = /* GraphQL */ `
+  query TrendcartMainTheme {
+    themes(first: 1, roles: [MAIN]) {
+      nodes {
+        id
+      }
+    }
+  }
+`;
+
+/** Requires write_themes and a Shopify exemption for theme file modification. */
+export const THEME_FILES_UPSERT_MUTATION = /* GraphQL */ `
+  mutation TrendcartThemeFilesUpsert(
+    $themeId: ID!
+    $files: [OnlineStoreThemeFilesUpsertFileInput!]!
+  ) {
+    themeFilesUpsert(themeId: $themeId, files: $files) {
+      upsertedThemeFiles {
+        filename
+      }
+      userErrors {
+        field
+        message
+        code
+      }
+    }
+  }
+`;
+
+/** Every product metafield definition (names and types of template slots). */
+export const PRODUCT_METAFIELD_DEFINITIONS_QUERY = /* GraphQL */ `
+  query TrendcartProductMetafieldDefinitions($after: String) {
+    metafieldDefinitions(first: 250, after: $after, ownerType: PRODUCT) {
+      nodes {
+        namespace
+        key
+        name
+        description
+        type {
+          name
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
 export const METAFIELD_DEFINITIONS_QUERY = /* GraphQL */ `
   query TrendcartMetafieldDefinitions {
     ${ENSURED_METAFIELD_DEFINITIONS.map(
@@ -174,6 +286,47 @@ type TemplatesData = {
         pageInfo: { hasNextPage: boolean; endCursor: string | null };
       } | null;
     }[];
+  };
+};
+
+type TemplateFileData = {
+  themes: {
+    nodes: {
+      id: string;
+      files: { nodes: { filename: string; body: { content?: string } | null }[] } | null;
+    }[];
+  };
+};
+
+type SectionFilesData = {
+  themes: {
+    nodes: {
+      id: string;
+      files: {
+        nodes: { filename: string; body: { content?: string } | null }[];
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      } | null;
+    }[];
+  };
+};
+
+type ThemeFilesUpsertData = {
+  themeFilesUpsert: {
+    upsertedThemeFiles: { filename: string }[] | null;
+    userErrors: UserError[];
+  };
+};
+
+type ProductDefinitionsData = {
+  metafieldDefinitions: {
+    nodes: {
+      namespace: string;
+      key: string;
+      name: string;
+      description: string | null;
+      type: { name: string };
+    }[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
 };
 
@@ -288,7 +441,7 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       const { clientId } = appCredentials(app);
       const params = new URLSearchParams({
         client_id: clientId,
-        scope: SHOPIFY_SCOPES.join(","),
+        scope: requestedShopifyScopes().join(","),
         redirect_uri: oauth.redirectUri,
         state: oauth.state,
       });
@@ -370,6 +523,107 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
         after = files.pageInfo.endCursor;
       }
       return parseTemplateSuffixes(filenames);
+    },
+
+    async getProductTemplateStructure(creds, suffix) {
+      const template = await readTemplateJson(creds, suffix);
+
+      const definitions: MetafieldDefinitionInfo[] = [];
+      let after: string | null = null;
+      for (let page = 0; page < 4; page++) {
+        const defs: ProductDefinitionsData = await gql<ProductDefinitionsData>(
+          creds,
+          PRODUCT_METAFIELD_DEFINITIONS_QUERY,
+          { after },
+        );
+        definitions.push(
+          ...defs.metafieldDefinitions.nodes.map((d) => ({
+            namespace: d.namespace,
+            key: d.key,
+            name: d.name,
+            description: d.description,
+            type: d.type.name,
+          })),
+        );
+        const info = defs.metafieldDefinitions.pageInfo;
+        if (!info.hasNextPage || !info.endCursor) break;
+        after = info.endCursor;
+      }
+      return productTemplateStructureSchema.parse(
+        buildTemplateStructure(suffix, template, definitions),
+      );
+    },
+
+    async getTemplateDesignContext(creds, baseSuffix) {
+      const base = await readTemplateJson(creds, baseSuffix);
+      const files: { filename: string; content: string }[] = [];
+      let after: string | null = null;
+      for (let page = 0; page < 8; page++) {
+        const data: SectionFilesData = await gql<SectionFilesData>(
+          creds,
+          THEME_SECTION_FILES_QUERY,
+          { after },
+        );
+        const theme = data.themes.nodes[0];
+        if (!theme) throw shopifyError("not_found", "The store has no published (MAIN) theme.");
+        if (!theme.files) break;
+        for (const n of theme.files.nodes) {
+          if (typeof n.body?.content === "string") {
+            files.push({ filename: n.filename, content: n.body.content });
+          }
+        }
+        if (!theme.files.pageInfo.hasNextPage || !theme.files.pageInfo.endCursor) break;
+        after = theme.files.pageInfo.endCursor;
+      }
+      // The buy box section the base template uses (its addable blocks).
+      const mainType = Object.values(
+        (base.sections ?? {}) as Record<string, { type?: unknown }>,
+      ).find((sec) => typeof sec?.type === "string" && isMainProductSection(sec.type))?.type;
+      const mainFile = files.find((f) => f.filename === `sections/${String(mainType)}.liquid`);
+      const settingsData = await readThemeJson(creds, "config/settings_data.json").catch(
+        () => null,
+      );
+      return {
+        base,
+        sections: sectionCatalog(files),
+        mainSection: mainFile ? parseMainSectionSchema(mainFile.filename, mainFile.content) : null,
+        colorSchemes: colorSchemesFromSettings(settingsData),
+      };
+    },
+
+    async upsertProductTemplate(creds, input) {
+      if (!isGeneratedTemplateSuffix(input.suffix)) {
+        throw shopifyError(
+          "invalid_input",
+          "Trendcart only writes the templates it generates (product.tc-*.json).",
+          { retryable: false },
+        );
+      }
+      const theme = await gql<{ themes: { nodes: { id: string }[] } }>(creds, MAIN_THEME_ID_QUERY);
+      const themeId = theme.themes.nodes[0]?.id;
+      if (!themeId) throw shopifyError("not_found", "The store has no published (MAIN) theme.");
+      let data: ThemeFilesUpsertData;
+      try {
+        data = await gql<ThemeFilesUpsertData>(creds, THEME_FILES_UPSERT_MUTATION, {
+          themeId,
+          files: [
+            {
+              filename: templateFilename(input.suffix),
+              body: { type: "TEXT", value: JSON.stringify(input.template, null, 2) },
+            },
+          ],
+        });
+      } catch (error) {
+        if (error instanceof IntegrationError && error.code === "permission_denied") {
+          throw shopifyError(
+            "permission_denied",
+            "Shopify refused to write the theme template: the app needs the write_themes scope and Shopify's theme-modification exemption. Reconnect the store after enabling it, or use an existing template.",
+            { retryable: false, cause: error },
+          );
+        }
+        throw error;
+      }
+      assertNoUserErrors("themeFilesUpsert", data.themeFilesUpsert.userErrors);
     },
 
     ensureMetafieldDefinitions,
@@ -487,6 +741,38 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       return toProductRef(creds.shopDomain, data.productUpdate.product);
     },
   };
+
+  /** templates/product[.suffix].json of the live theme, parsed. */
+  async function readTemplateJson(
+    creds: ShopifyCredentials,
+    suffix: string | null,
+  ): Promise<Record<string, unknown>> {
+    return readThemeJson(creds, templateFilename(suffix));
+  }
+
+  /** A JSON file of the live theme, parsed (Shopify's leading comment tolerated). */
+  async function readThemeJson(
+    creds: ShopifyCredentials,
+    filename: string,
+  ): Promise<Record<string, unknown>> {
+    const data = await gql<TemplateFileData>(creds, PRODUCT_TEMPLATE_FILE_QUERY, { filename });
+    const theme = data.themes.nodes[0];
+    if (!theme) throw shopifyError("not_found", "The store has no published (MAIN) theme.");
+    const file = theme.files?.nodes.find((n) => n.filename === filename);
+    if (!file) {
+      throw shopifyError("not_found", `The store's theme has no ${filename} file.`, {
+        retryable: false,
+      });
+    }
+    const template =
+      typeof file.body?.content === "string" ? parseTemplateJson(file.body.content) : null;
+    if (!template) {
+      throw shopifyError("invalid_input", `${filename} is not a readable JSON template.`, {
+        retryable: false,
+      });
+    }
+    return template;
+  }
 
   async function ensureMetafieldDefinitions(creds: ShopifyCredentials): Promise<void> {
     const existing = await gql<DefinitionsData>(creds, METAFIELD_DEFINITIONS_QUERY);

@@ -146,6 +146,10 @@ function copyTexts(copy: PageCopy): { field: string; text: string }[] {
           { field: "seo.description", text: copy.seo.description },
         ]
       : []),
+    ...(copy.templateFields ?? []).map((f, i) => ({
+      field: `templateFields[${i}]`,
+      text: stripTags(f.value),
+    })),
   ];
 }
 

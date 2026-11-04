@@ -4,6 +4,7 @@
  */
 import { findUnsafeClaims } from "@/lib/ai/copy-safety";
 import type { ShopifyDraftProductInput, SupplierListing } from "@/lib/domain/contracts";
+import { fullSizeImageUrl, isPageImage } from "@/lib/sourcing/images";
 
 /** Shopify allows 3 options; we keep the variant matrix small for a test product. */
 export const MAX_OPTIONS = 3;
@@ -89,6 +90,44 @@ export function safeVariantGroups(
     .filter((g) => !isUnsafeText(g.name))
     .map((g) => ({ ...g, values: g.values.filter((v) => !isUnsafeText(v)) }))
     .filter((g) => g.values.length > 0);
+}
+
+/** Below this many photos from the chosen supplier, the gallery is topped up. */
+export const MIN_PAGE_IMAGES = 6;
+/** Other listings lend photos only when they very likely show the same product. */
+export const LENDER_MIN_MATCH = 0.6;
+
+/**
+ * Gallery of the Shopify draft: every photo of the chosen supplier first (at
+ * original size); when that leaves fewer than MIN_PAGE_IMAGES, the reference
+ * image of the analysis, then photos of the other listings of the same
+ * product (best match first, match ≥ LENDER_MIN_MATCH). Search thumbnails are
+ * never used. Deterministic for the same rows, so re-syncs keep the media.
+ */
+export function pageImageUrls(input: {
+  selected: readonly string[];
+  referenceImageUrl?: string | null;
+  others: readonly { images: readonly string[]; matchScore: number }[];
+}): string[] {
+  const usable = (urls: readonly (string | null | undefined)[]) =>
+    urls
+      .filter((u): u is string => !!u)
+      .map(fullSizeImageUrl)
+      .filter(isPageImage);
+  const gallery = draftImageUrls(usable(input.selected));
+  if (gallery.length >= MIN_PAGE_IMAGES) return gallery;
+  const lenders = [...input.others]
+    .filter((o) => o.matchScore >= LENDER_MIN_MATCH)
+    .sort((a, b) => b.matchScore - a.matchScore);
+  const extra: string[] = [];
+  for (const url of [
+    ...usable([input.referenceImageUrl]),
+    ...lenders.flatMap((o) => usable(o.images)),
+  ]) {
+    if (gallery.length + extra.length >= MIN_PAGE_IMAGES) break;
+    if (!gallery.includes(url) && !extra.includes(url)) extra.push(url);
+  }
+  return draftImageUrls(gallery, extra);
 }
 
 /** Public https image URLs, deduplicated, at most MAX_IMAGES. */

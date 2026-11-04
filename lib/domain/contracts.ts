@@ -163,6 +163,172 @@ export const shopifyFaqItemSchema = z.object({
   answer: z.string().min(1),
 });
 
+/** Product metafield types Trendcart writes into a template slot (text only). */
+export const templateSlotTypeSchema = z.enum([
+  "single_line_text_field",
+  "multi_line_text_field",
+  "rich_text_field",
+  "list.single_line_text_field",
+]);
+export type TemplateSlotType = z.infer<typeof templateSlotTypeSchema>;
+
+const metafieldNamespaceSchema = z.string().regex(/^[A-Za-z0-9_-]{1,255}$/);
+const metafieldKeySchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+
+/**
+ * A product metafield the selected theme template renders through a dynamic
+ * source (`{{ product.metafields.<namespace>.<key> }}` in a section or block
+ * setting), that Trendcart fills with generated copy.
+ */
+export const templateSlotSchema = z.object({
+  namespace: metafieldNamespaceSchema,
+  key: metafieldKeySchema,
+  type: templateSlotTypeSchema,
+  /** Metafield definition name, e.g. "How to use". */
+  name: z.string().max(255),
+  description: z.string().max(500).nullable(),
+  /** Where the template renders it, e.g. "Image with text › text › text". */
+  usedIn: z.array(z.string().max(300)).max(10),
+  /** Static texts of the same section (headings, labels): what the slot is about. */
+  context: z.array(z.string().max(200)).max(10),
+});
+export type TemplateSlot = z.infer<typeof templateSlotSchema>;
+
+/** Content structure of one product template of the store's live theme. */
+export const productTemplateStructureSchema = z.object({
+  /** null = templates/product.json. */
+  suffix: z.string().nullable(),
+  /** Sections in render order with their block types, for the copywriter. */
+  outline: z.array(z.string().max(300)).max(60),
+  /** Metafields to generate, in template order. */
+  slots: z.array(templateSlotSchema).max(30),
+  /** Metafields the template shows that Trendcart does not write (files, references, numbers…). */
+  skipped: z.array(z.object({ namespace: z.string(), key: z.string(), type: z.string() })).max(50),
+});
+export type ProductTemplateStructure = z.infer<typeof productTemplateStructureSchema>;
+
+/* Template generation (a CRO template designed by Claude from the theme's sections) */
+
+/** A theme setting Trendcart can fill (text and simple values; never media or links). */
+export const themeSettingSpecSchema = z.object({
+  id: z.string(),
+  type: z.enum([
+    "text",
+    "textarea",
+    "richtext",
+    "inline_richtext",
+    "select",
+    "radio",
+    "checkbox",
+    "range",
+    "number",
+    /** Button / link targets: "product" (this product) or "all_products". */
+    "url",
+    /** One of the theme color schemes (art direction per section). */
+    "color_scheme",
+    /** Product photos, only when the template may use images. */
+    "image_picker",
+  ]),
+  label: z.string(),
+  options: z.array(z.string()).optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  step: z.number().optional(),
+});
+export type ThemeSettingSpec = z.infer<typeof themeSettingSpecSchema>;
+
+/** One section of the live theme that a product template may use. */
+export const themeSectionSpecSchema = z.object({
+  /** sections/<type>.liquid */
+  type: z.string(),
+  name: z.string(),
+  settings: z.array(themeSettingSpecSchema),
+  blocks: z.array(
+    z.object({
+      type: z.string(),
+      name: z.string(),
+      settings: z.array(themeSettingSpecSchema),
+      limit: z.number().int().positive().optional(),
+    }),
+  ),
+  maxBlocks: z.number().int().positive().optional(),
+  /** Has image/video/product pickers Trendcart leaves empty: it may show placeholders. */
+  hasMediaSettings: z.boolean(),
+});
+export type ThemeSectionSpec = z.infer<typeof themeSectionSpecSchema>;
+
+/** A theme color scheme (config/settings_data.json), for the page's art direction. */
+export const themeColorSchemeSchema = z.object({
+  id: z.string(),
+  background: z.string().nullable(),
+  text: z.string().nullable(),
+  button: z.string().nullable(),
+});
+export type ThemeColorScheme = z.infer<typeof themeColorSchemeSchema>;
+
+/** What Claude designs: sections placed after the base template's main product section. */
+const planSettingSchema = z.object({ id: z.string(), value: z.string() });
+
+/** Where a block is added in the main product section (the buy box). */
+export const mainBlockPositionSchema = z.enum([
+  "after_title",
+  "after_price",
+  "before_buy_buttons",
+  "after_buy_buttons",
+  "end",
+]);
+
+export const templatePlanSchema = z.object({
+  /** Blocks added to the buy box (benefits, reassurance, details tabs...). */
+  mainBlocks: z
+    .array(
+      z.object({
+        type: z.string(),
+        position: mainBlockPositionSchema,
+        settings: z.array(planSettingSchema).max(40),
+      }),
+    )
+    .max(8)
+    .default([]),
+  sections: z
+    .array(
+      z.object({
+        type: z.string(),
+        /** Why this section is there (CRO role), shown to reviewers. */
+        purpose: z.string().max(300),
+        settings: z.array(planSettingSchema).max(40),
+        blocks: z
+          .array(z.object({ type: z.string(), settings: z.array(planSettingSchema).max(40) }))
+          .max(16),
+      }),
+    )
+    .max(12),
+});
+export type TemplatePlan = z.infer<typeof templatePlanSchema>;
+
+/**
+ * Product template a page is built on: an existing template of the live
+ * theme ("existing"), or a template Claude designs for this product from the
+ * theme's sections, keeping the main product section of `suffix` ("generate").
+ */
+export const pageTemplateChoiceSchema = z.object({
+  mode: z.enum(["existing", "generate"]),
+  /** existing: the template; generate: the base template (null = product.json). */
+  suffix: z.string().min(1).max(100).nullable(),
+  /** generate: sections may show the product photos (image settings filled). */
+  withImages: z.boolean().default(false),
+  /** Set once the generated template was written to the theme. */
+  generated: z
+    .object({
+      suffix: z.string().min(1).max(100),
+      sections: z.array(z.object({ type: z.string(), name: z.string(), purpose: z.string() })),
+      generatedAt: z.string(),
+    })
+    .nullable()
+    .default(null),
+});
+export type PageTemplateChoice = z.infer<typeof pageTemplateChoiceSchema>;
+
 export const shopifyDraftProductInputSchema = z.object({
   /**
    * Stable Trendcart key (e.g. the Trendcart product id). When set, re-running
@@ -202,6 +368,18 @@ export const shopifyDraftProductInputSchema = z.object({
     faq: z.array(shopifyFaqItemSchema),
     guarantee: z.string(),
   }),
+  /** Template slot metafields, `value` already in Shopify's format for `type`. */
+  extraMetafields: z
+    .array(
+      z.object({
+        namespace: metafieldNamespaceSchema,
+        key: metafieldKeySchema,
+        type: templateSlotTypeSchema,
+        value: z.string().min(1),
+      }),
+    )
+    .max(30)
+    .default([]),
 });
 export type ShopifyDraftProductInput = z.input<typeof shopifyDraftProductInputSchema>;
 
@@ -247,6 +425,39 @@ export interface ShopifyClient {
   getShopInfo(creds: ShopifyCredentials): Promise<ShopifyShopInfo>;
   /** Template suffixes found in the active theme's templates/product*.json (null = default). */
   listProductTemplates(creds: ShopifyCredentials): Promise<(string | null)[]>;
+  /**
+   * Reads templates/product[.suffix].json of the live theme (read_themes) and
+   * the product metafield definitions: the text metafields its sections and
+   * blocks render, to generate content for. not_found when the template is gone.
+   */
+  getProductTemplateStructure(
+    creds: ShopifyCredentials,
+    suffix: string | null,
+  ): Promise<ProductTemplateStructure>;
+  /**
+   * What a generated template is built from: the base template's JSON (its
+   * main product section is kept) and the theme sections usable in product
+   * templates (sections/*.liquid schemas). read_themes only.
+   */
+  getTemplateDesignContext(
+    creds: ShopifyCredentials,
+    baseSuffix: string | null,
+  ): Promise<{
+    base: Record<string, unknown>;
+    sections: ThemeSectionSpec[];
+    /** Blocks the base's main product section accepts (null when unknown). */
+    mainSection: ThemeSectionSpec | null;
+    colorSchemes: ThemeColorScheme[];
+  }>;
+  /**
+   * Writes templates/product.<suffix>.json to the live theme (themeFilesUpsert:
+   * write_themes + a Shopify exemption). Never overwrites a template Trendcart
+   * did not generate (suffix must start with "tc-").
+   */
+  upsertProductTemplate(
+    creds: ShopifyCredentials,
+    input: { suffix: string; template: Record<string, unknown> },
+  ): Promise<void>;
   /** Idempotent: creates custom.highlights, custom.faq and custom.guarantee if missing. */
   ensureMetafieldDefinitions(creds: ShopifyCredentials): Promise<void>;
 
@@ -579,8 +790,19 @@ export const supplierListingSchema = z.object({
   ),
   /** 0..1 similarity with the analysed product. */
   matchScore: z.number().min(0).max(1),
+  /** Average rating out of 5 printed on the listing; null when not shown. */
+  rating: z.number().min(0).max(5).nullable().default(null),
+  /** Number of reviews printed on the listing; null when not shown. */
+  reviewCount: z.number().int().nonnegative().nullable().default(null),
+  /**
+   * 0..1 quality/price ratio among the listings of one search: relevance,
+   * landed cost, rating (weighted by review count) and delivery time
+   * (lib/sourcing/value.ts). Listings are offered best value first.
+   */
+  valueScore: z.number().min(0).max(1).default(0),
 });
 export type SupplierListing = z.infer<typeof supplierListingSchema>;
+export type SupplierListingInput = z.input<typeof supplierListingSchema>;
 
 export interface SupplierFinder {
   find(
@@ -594,6 +816,11 @@ export interface SupplierFinder {
       /** Listing URLs rejected at GATE 2: never return these again. */
       excludeUrls?: string[];
     },
+    /**
+     * Listings best value first. AliExpress, CJ Dropshipping and Amazon are
+     * always searched; the best offer of each is returned when one matches
+     * the product (REQUIRED_SUPPLIER_SOURCES).
+     */
   ): Promise<Metered<SupplierListing[]>>;
 }
 
@@ -638,6 +865,19 @@ export interface ComplianceChecker {
 /* Copywriting                                                                */
 /* -------------------------------------------------------------------------- */
 
+/** Max characters of one template field (lists: the whole field, items joined by newlines). */
+export const TEMPLATE_FIELD_MAX = 5000;
+
+export const pageTemplateFieldSchema = z.object({
+  namespace: metafieldNamespaceSchema,
+  key: metafieldKeySchema,
+  type: templateSlotTypeSchema,
+  /** Slot name shown to reviewers. */
+  label: z.string().min(1).max(255),
+  value: z.string().trim().min(1).max(TEMPLATE_FIELD_MAX),
+});
+export type PageTemplateField = z.infer<typeof pageTemplateFieldSchema>;
+
 export const pageCopySchema = z.object({
   title: z.string().min(1).max(255),
   descriptionHtml: z.string().min(1),
@@ -650,6 +890,11 @@ export const pageCopySchema = z.object({
   seo: z
     .object({ title: z.string().min(1).max(70), description: z.string().min(1).max(320) })
     .optional(),
+  /**
+   * Content for the selected template's slots (see TemplateSlot), pushed as
+   * product metafields. Plain text; list types hold one item per line.
+   */
+  templateFields: z.array(pageTemplateFieldSchema).max(30).optional(),
 });
 export type PageCopy = z.infer<typeof pageCopySchema>;
 
@@ -669,8 +914,32 @@ export interface Copywriter {
       brandName: string;
       /** GATE 3 rejection feedback that steers a regeneration. */
       hint?: CopyHint;
+      /** Selected theme template: the copy fills its slots (templateFields). */
+      template?: Pick<ProductTemplateStructure, "outline" | "slots">;
     },
   ): Promise<Metered<PageCopy>>;
+  /**
+   * Designs a conversion-oriented product page from the theme's sections:
+   * which sections, in which order, with their text settings, consistent
+   * with the page copy. Only types and setting ids of `sections` are valid.
+   */
+  designTemplate(
+    ctx: CallContext,
+    input: {
+      analysis: ProductAnalysis;
+      copy: PageCopy;
+      language: string;
+      brandName: string;
+      sections: ThemeSectionSpec[];
+      /** Buy box blocks that can be added (null: none). */
+      mainSection: ThemeSectionSpec | null;
+      colorSchemes: ThemeColorScheme[];
+      /** Product photos: shown to the model for the art direction; "image:N" refers to them. */
+      imageUrls: string[];
+      /** Whether image settings may be filled with the product photos. */
+      withImages: boolean;
+    },
+  ): Promise<Metered<TemplatePlan>>;
 }
 
 /* -------------------------------------------------------------------------- */
