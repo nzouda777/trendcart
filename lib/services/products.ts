@@ -5,14 +5,22 @@ import { z } from "zod";
 
 import { writeAudit } from "@/lib/audit";
 import { requirePermission } from "@/lib/auth/guards";
-import { IntegrationError, productStatusSchema, type ProductStatus } from "@/lib/domain/contracts";
+import {
+  IntegrationError,
+  pageCopySchema,
+  productStatusSchema,
+  type PageCopy,
+  type ProductStatus,
+} from "@/lib/domain/contracts";
 import type { TikTokLink } from "@/lib/integrations/tiktok-data/links";
 import { parseImportLink, type ImportLink } from "@/lib/sourcing/links";
 import {
   gateForStatus,
   isRunningStatus,
+  productStepSchema,
   stepForStatus,
   type ApprovalEvidence,
+  type ProductStep,
 } from "@/lib/domain/state-machine";
 import {
   approval,
@@ -27,13 +35,20 @@ import {
 } from "@/lib/db/schema";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row } from "@/lib/tenant/scoped-db";
+import { isComplianceOutdated } from "@/lib/workflows/compliance-claims";
 import { LEASE_TTL_MS } from "@/lib/workflows/concurrency";
-import { gatePartStates, lockProduct, recordGateDecision } from "@/lib/workflows/gate-payloads";
+import {
+  gatePartStates,
+  loadSupplierChoice,
+  lockProduct,
+  recordGateDecision,
+} from "@/lib/workflows/gate-payloads";
 import { findOpenJob, latestFailedStep } from "@/lib/workflows/jobs";
 import { applyProductEventTo } from "@/lib/workflows/product-status";
+import { deleteGeneratedTemplate } from "@/lib/workflows/steps/build";
 
 import { idSchema } from "./brands";
-import { resolveNow, resolvePipeline, type ServiceDeps } from "./deps";
+import { resolveIntegrations, resolveNow, resolvePipeline, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
 import { enforceImportLimit } from "./rate-limit";
 import type {
@@ -91,7 +106,11 @@ export type ListProductsInput = z.input<typeof listProductsSchema>;
 const iso = (d: Date) => d.toISOString();
 const isoOrNull = (d: Date | null) => (d ? d.toISOString() : null);
 
-function toListItem(row: Row<typeof product>, thumbnailUrl: string | null): ProductListItemDTO {
+function toListItem(
+  row: Row<typeof product>,
+  thumbnailUrl: string | null,
+  failedStep: ProductStep | null,
+): ProductListItemDTO {
   return {
     id: row.id,
     brandId: row.brandId,
@@ -102,6 +121,7 @@ function toListItem(row: Row<typeof product>, thumbnailUrl: string | null): Prod
     gate: gateForStatus(row.status),
     thumbnailUrl,
     sellingPrice: row.sellingPrice,
+    failedStep: row.status === "failed" ? failedStep : null,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   };
@@ -145,7 +165,7 @@ export function toPostDTO(r: Row<typeof tiktokPost>, profileName: string | null)
   };
 }
 
-function toVideoDTO(r: Row<typeof video>, posts: TikTokPostDTO[] = []): VideoDTO {
+function toVideoDTO(r: Row<typeof video>, posts: TikTokPostDTO[], copy: PageCopy | null): VideoDTO {
   const checkError = (r.metadata as { checkError?: unknown } | null)?.checkError;
   return {
     id: r.id,
@@ -163,6 +183,7 @@ function toVideoDTO(r: Row<typeof video>, posts: TikTokPostDTO[] = []): VideoDTO
     tiktokVideoIds: r.tiktokVideoIds ?? {},
     checkError: typeof checkError === "string" ? checkError : null,
     posts,
+    complianceOutdated: isComplianceOutdated(r.compliance, r.metadata, copy),
   };
 }
 
@@ -218,16 +239,17 @@ export async function loadDetail(
   const failedJob = failedStep
     ? jobs.find((j) => j.step === failedStep && j.status === "failed")
     : undefined;
+  const parsedCopy = row.pageCopy ? pageCopySchema.safeParse(row.pageCopy) : null;
+  const copy = parsedCopy?.success ? parsedCopy.data : null;
   return {
-    ...toListItem(row, thumbnailOf(videos)),
+    ...toListItem(row, thumbnailOf(videos), failedStep),
     analysis: row.analysis,
     compareAtPrice: row.compareAtPrice,
     margin: row.margin,
-    failedStep,
     error: failedJob?.error ?? null,
     jobs: jobs.map(toJobDTO),
     approvals: approvals.map(toApprovalDTO),
-    videos: videos.map((v) => toVideoDTO(v, posts.get(v.id) ?? [])),
+    videos: videos.map((v) => toVideoDTO(v, posts.get(v.id) ?? [], copy)),
   };
 }
 
@@ -347,8 +369,23 @@ export async function listProducts(
     list.push(v2);
     byProduct.set(v2.productId, list);
   }
+  // Step each failed product failed in: its latest failed job (one query).
+  const failedIds = rows.filter((r) => r.status === "failed").map((r) => r.id);
+  const failedJobs = failedIds.length
+    ? await ctx.db.select(job, {
+        where: and(inArray(job.productId, failedIds), eq(job.status, "failed")),
+        orderBy: (t) => desc(t.updatedAt),
+      })
+    : [];
+  const failedSteps = new Map<string, ProductStep>();
+  for (const j of failedJobs) {
+    const step = productStepSchema.safeParse(j.step);
+    if (step.success && !failedSteps.has(j.productId)) failedSteps.set(j.productId, step.data);
+  }
   return {
-    items: rows.map((r) => toListItem(r, thumbnailOf(byProduct.get(r.id) ?? []))),
+    items: rows.map((r) =>
+      toListItem(r, thumbnailOf(byProduct.get(r.id) ?? []), failedSteps.get(r.id) ?? null),
+    ),
     total,
   };
 }
@@ -569,7 +606,8 @@ export type DeleteProductResult = {
  * (listings, video links, jobs, approvals: ON DELETE CASCADE). Refused while a
  * step is running (unless its lease went stale), once the page was approved
  * or published on Shopify, and from GATE 4 on or when a campaign exists.
- * A Shopify draft created at GATE 2 is left on the store and reported back.
+ * A Shopify draft created at GATE 2 is left on the store and reported back;
+ * a theme template Trendcart generated for it is deleted (best effort).
  * Audited (product.delete) with the name and source link.
  */
 export async function deleteProduct(
@@ -581,7 +619,7 @@ export async function deleteProduct(
   const v = deleteSchema.parse(input);
   const now = resolveNow(deps)();
 
-  return ctx.db.transaction(async (tx) => {
+  const result = await ctx.db.transaction(async (tx) => {
     const row = await lockProduct(tx, v.productId);
     if (UNDELETABLE.includes(row.status)) {
       throw new ServiceError(
@@ -617,6 +655,8 @@ export async function deleteProduct(
       );
     }
 
+    // Read before the cascade removes the GATE 2 approval.
+    const choice = await loadSupplierChoice(tx, row.id);
     await tx.delete(product, eq(product.id, row.id));
     const shopifyDraftsLeft = pages.map((p) => ({
       shopifyProductId: p.shopifyProductId,
@@ -637,6 +677,21 @@ export async function deleteProduct(
         },
       },
     );
-    return { shopifyDraftsLeft };
+    const page = choice ? pages.find((p) => p.connectionId === choice.shopifyConnectionId) : null;
+    const template =
+      row.pageTemplate?.generated && choice
+        ? {
+            productId: row.id,
+            connectionId: choice.shopifyConnectionId,
+            shopifyProductId: page?.shopifyProductId ?? null,
+          }
+        : null;
+    return { shopifyDraftsLeft, template };
   });
+
+  // Abandoned while still a draft: its generated template goes too.
+  if (result.template) {
+    await deleteGeneratedTemplate(ctx, resolveIntegrations(deps), result.template);
+  }
+  return { shopifyDraftsLeft: result.shopifyDraftsLeft };
 }

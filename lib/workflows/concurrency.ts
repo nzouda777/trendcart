@@ -56,6 +56,19 @@ export async function withWorkspaceSlot<T>(
   }
 }
 
+/**
+ * A mutual-exclusion lock on `name` (a semaphore of one lease, same store as
+ * the workspace limits), or null when someone holds it. Expires after
+ * `ttlMs` if the holder dies. Release it in a `finally`.
+ */
+export async function tryLock(
+  limiter: ConcurrencyLimiter,
+  name: string,
+  ttlMs: number = LEASE_TTL_MS,
+): Promise<Lease | null> {
+  return limiter.tryAcquire(`tc:lock:${name}`, { limit: 1, ttlMs });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Upstash                                                                    */
 /* -------------------------------------------------------------------------- */

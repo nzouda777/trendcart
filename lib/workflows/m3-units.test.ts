@@ -1,12 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { IntegrationError, type VideoCandidate } from "@/lib/domain/contracts";
+import { IntegrationError, type PageCopy, type VideoCandidate } from "@/lib/domain/contracts";
 import { transition } from "@/lib/domain/state-machine";
 import { newCandidates, relatedVideoQuery } from "@/lib/media/candidates";
 import { ensureTikTokAdsVideo, shopifyVideoAlt, tiktokAdsFileName } from "@/lib/media/videos";
+import {
+  adAccountUnusableReason,
+  dailyBudgetMinimum,
+  MAX_DAILY_BUDGET,
+  maxDailyBudget,
+} from "@/lib/services/campaign-read";
 
-import { buildCampaignSpec, campaignName, MAX_ADS, withBudget } from "./campaign-spec";
-import { claimsVersion, complianceClaims, videosToCheck } from "./steps/videos";
+import {
+  advertiserBudget,
+  buildCampaignSpec,
+  campaignName,
+  MAX_ADS,
+  withBudget,
+} from "./campaign-spec";
+import { isComplianceOutdated } from "./compliance-claims";
+import {
+  claimsVersion,
+  complianceClaims,
+  hasIncompleteAiReview,
+  videosToCheck,
+} from "./steps/videos";
 
 const specInput = {
   productId: "11111111-2222-3333-4444-555555555555",
@@ -83,7 +101,7 @@ describe("related video candidates", () => {
     ]);
   });
 
-  it("checks pending videos without a report for the current claims", () => {
+  it("checks pending and approved videos without a report for the current claims", () => {
     const claims = complianceClaims(null);
     expect(claims).toEqual([]);
     const version = claimsVersion(["a"]);
@@ -111,7 +129,84 @@ describe("related video candidates", () => {
         metadata: { claimsVersion: version, checkError: "gone" },
       },
     ] as unknown as Parameters<typeof videosToCheck>[0];
-    expect(videosToCheck(rows, version).map((r) => r.id)).toEqual(["1", "3"]);
+    // "4": approved without a report for these claims, re-checked (report only, N13).
+    expect(videosToCheck(rows, version).map((r) => r.id)).toEqual(["1", "3", "4"]);
+  });
+
+  it("re-runs an incomplete AI review once per claims version, never a rejected video", () => {
+    const version = claimsVersion(["a"]);
+    const incomplete = {
+      overall: "fail",
+      rules: [{ ruleId: "policy.ai_review", kind: "policy", verdict: "fail", reason: "x" }],
+    };
+    const rows = [
+      {
+        id: "1",
+        approval: "pending",
+        compliance: incomplete,
+        metadata: { claimsVersion: version },
+      },
+      {
+        id: "2",
+        approval: "pending",
+        compliance: incomplete,
+        metadata: { claimsVersion: version, aiReviewRetried: version },
+      },
+      {
+        id: "3",
+        approval: "rejected",
+        compliance: incomplete,
+        metadata: { claimsVersion: "old" },
+      },
+      {
+        id: "4",
+        approval: "approved",
+        compliance: { overall: "pass", rules: [] },
+        metadata: { claimsVersion: "old" },
+      },
+    ] as unknown as Parameters<typeof videosToCheck>[0];
+    expect(hasIncompleteAiReview(rows[0]!.compliance)).toBe(true);
+    expect(hasIncompleteAiReview(rows[3]!.compliance)).toBe(false);
+    expect(videosToCheck(rows, version).map((r) => r.id)).toEqual(["1", "4"]);
+  });
+
+  it("flags a report made against other ad texts as outdated", () => {
+    const copy = { adTexts: ["Light up"], highlights: ["Warm"] } as unknown as PageCopy;
+    const current = claimsVersion(complianceClaims(copy));
+    expect(isComplianceOutdated({ overall: "pass" }, { claimsVersion: current }, copy)).toBe(false);
+    expect(isComplianceOutdated({ overall: "pass" }, { claimsVersion: "old" }, copy)).toBe(true);
+    expect(isComplianceOutdated(null, { claimsVersion: "old" }, copy)).toBe(false);
+    expect(isComplianceOutdated({ overall: "pass" }, {}, null)).toBe(false);
+  });
+});
+
+describe("campaign budget cap, conversion and ad account currency (N9, B1)", () => {
+  it("caps a daily budget at 10x the brand default (converted), else the current amount", () => {
+    expect(maxDailyBudget(30, 30)).toBe(300);
+    expect(maxDailyBudget(30, 33, 1.1)).toBe(330);
+    expect(maxDailyBudget(null, 25)).toBe(250);
+    expect(maxDailyBudget(500_000, 30)).toBe(MAX_DAILY_BUDGET);
+  });
+
+  it("converts the brand default test budget with the GATE 3 rate, 2 decimals", () => {
+    expect(advertiserBudget(30)).toBe(30);
+    expect(advertiserBudget(30, 1.0837)).toBe(32.51);
+    const spec = buildCampaignSpec({ ...specInput, fxRate: 160.25 });
+    expect(spec.budget).toEqual({ mode: "daily", amount: 4006.25, level: "ad_group" });
+  });
+
+  it("knows TikTok's daily minimum where verified", () => {
+    expect(dailyBudgetMinimum("ad_group", "USD")).toBe(20);
+    expect(dailyBudgetMinimum("campaign", "USD")).toBe(50);
+  });
+
+  it("refuses an inactive ad account or one of unknown currency; another currency is usable", () => {
+    expect(adAccountUnusableReason({ status: "active", currency: "EUR" })).toBeNull();
+    expect(adAccountUnusableReason({ status: "expiring", currency: "USD" })).toBeNull();
+    expect(adAccountUnusableReason({ status: "needs_reauth", currency: "EUR" })).toMatch(
+      /reconnected/,
+    );
+    expect(adAccountUnusableReason({ status: "active", currency: null })).toMatch(/Reconnect/);
   });
 });
 

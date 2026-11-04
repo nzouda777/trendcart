@@ -70,6 +70,7 @@ export {
   approveVideo,
   approveVideos,
   publishToProfile,
+  recheckVideo,
   refreshTikTokPosts,
   rejectVideo,
 } from "./videos";

@@ -75,6 +75,11 @@ export type TikTokAdConnectionDTO = ConnectionBase & {
   kind: "tiktok_ads";
   advertiserId: string;
   name: string;
+  /**
+   * Advertiser billing currency (ISO 4217) as TikTok reports it; budgets are
+   * spent in it. Null = unknown (connected before it was stored): reconnect.
+   */
+  currency: string | null;
 };
 
 export type TikTokProfileConnectionDTO = ConnectionBase & {
@@ -151,6 +156,12 @@ export type VideoDTO = {
   checkError: string | null;
   /** Posts of this video to TikTok profiles (newest first). */
   posts: TikTokPostDTO[];
+  /**
+   * The compliance report was made against other ad texts / highlights than
+   * the current page copy (a re-check is due; the build step or recheckVideo
+   * runs it). False without a report or without page copy.
+   */
+  complianceOutdated: boolean;
 };
 
 export type TikTokPostDTO = {
@@ -176,6 +187,8 @@ export type ProductListItemDTO = {
   gate: Gate | null;
   thumbnailUrl: string | null;
   sellingPrice: number | null;
+  /** Step that failed when status is "failed" (e.g. "launch"), else null. */
+  failedStep: ProductStep | null;
   createdAt: ISODate;
   updatedAt: ISODate;
 };
@@ -184,8 +197,6 @@ export type ProductDetailDTO = ProductListItemDTO & {
   analysis: ProductAnalysis | null;
   compareAtPrice: number | null;
   margin: MarginBreakdown | null;
-  /** Step that failed when status is "failed". */
-  failedStep: ProductStep | null;
   /** Latest error message when failed. */
   error: string | null;
   jobs: JobDTO[];
@@ -332,11 +343,18 @@ export type ProductPipelineDTO = ProductDetailDTO & {
   campaign: CampaignDTO | null;
   /**
    * The GATE 4 launch in flight (approval recorded, TikTok call running),
-   * else null. `stale` after 5 minutes: launchCampaign can be approved again.
+   * else null. `stale` after STALE_LAUNCH_CLAIM_MS (15 minutes, longer than
+   * any function runs): launchCampaign can be approved again.
    */
   launchClaim: { startedAt: ISODate; stale: boolean } | null;
   /** Whether the posting app is audited (else posts are private: SELF_ONLY). */
   postingAudited: boolean;
+  /**
+   * Whether the caller's role may complete the GATE 3 videos part and choose
+   * the TikTok Ads account (campaign:create: owner, media buyer). Creatives
+   * still approve / reject single videos.
+   */
+  canChooseAdAccount: boolean;
 };
 
 /* Campaigns (M3: GATE 4, launch, stats) ------------------------------------ */
@@ -365,8 +383,46 @@ export type CampaignDTO = {
   adConnectionId: string;
   advertiserId: string | null;
   advertiserName: string | null;
-  /** "paused" before launch (and after a pause), "active" once launched. */
+  /**
+   * Advertiser (billing) currency, ISO 4217: `config.budget`, `maxBudget`,
+   * `minBudget`, `stats` and `totals` are all in it. Null when unknown.
+   */
+  currency: string | null;
+  /** Brand (selling) currency. */
+  brandCurrency: string;
+  /**
+   * Human-supplied rate recorded at GATE 3: 1 brand unit = fxRate advertiser
+   * units. Null when the two currencies are equal.
+   */
+  fxRate: number | null;
+  /**
+   * Spend and revenue converted back to the brand currency with the recorded
+   * rate (approximate: the rate is not today's). Null when the currencies are
+   * equal. ROAS is a ratio and needs no conversion.
+   */
+  totalsInBrandCurrency: { spend: number; revenue: number; approximate: true } | null;
+  /**
+   * "paused" before launch (and after a pause), "active" once launched.
+   * "failed": a launch failed AND pausing it again failed, so part of it may
+   * be spending (see `spendingUnknown`).
+   */
   status: CampaignStatus;
+  /**
+   * True when Trendcart cannot tell whether the campaign is spending (a failed
+   * launch whose re-pause failed). Show "check TikTok Ads Manager" and offer
+   * pauseCampaign, which pauses it again.
+   */
+  spendingUnknown: boolean;
+  /**
+   * Whether updateCampaignBudget can be called now: the campaign exists on
+   * TikTok (paused or active), the product is at GATE 4 or launched, and no
+   * launch is in flight.
+   */
+  budgetUpdatable: boolean;
+  /** Highest daily amount updateCampaignBudget accepts (advertiser currency). */
+  maxBudget: number;
+  /** TikTok's daily minimum for this budget level, when known (advertiser currency). */
+  minBudget: number | null;
   /** The spec sent to TikTok (budget, targeting, ads). */
   config: CampaignSpec;
   tiktokIds: CampaignIds | null;
@@ -383,6 +439,17 @@ export type TikTokAdAccountOptionDTO = {
   advertiserId: string;
   name: string;
   status: ConnectionStatus;
+  /** Advertiser currency (null = unknown: reconnect before use). */
+  currency: string | null;
+  /** Can be chosen at GATE 3: working connection and known currency. */
+  usable: boolean;
+  /** Why it cannot be chosen (null when usable). */
+  unusableReason: string | null;
+  /**
+   * It bills in another currency than the brand: approveVideos then needs an
+   * `fxRate` (1 brand unit = fxRate advertiser units), supplied by the user.
+   */
+  needsFxRate: boolean;
 };
 
 export type TikTokProfileOptionDTO = {

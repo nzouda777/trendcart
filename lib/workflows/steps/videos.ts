@@ -7,15 +7,19 @@
  *    next to the imported one: URL, author, thumbnail URL and metadata only,
  *    never a media URL (lib/media/candidates). Searched once per product:
  *    a re-run (page rejection, retry) keeps the stored candidates.
- * 2. Check: ComplianceChecker on each pending candidate, with a fresh media
- *    URL resolved just in time for its size and duration (never stored), the
- *    page claims (ad texts and highlights) and the brand country. Only the
- *    JSON report is stored. A candidate is checked again only when the claims
- *    changed (new copy). A video that can no longer be resolved is marked
- *    `checkError` and skipped.
+ * 2. Check: ComplianceChecker on each pending or approved video, with a
+ *    fresh media URL resolved just in time for its size and duration (never
+ *    stored), the page claims (ad texts and highlights) and the brand country.
+ *    Only the JSON report is stored. A video is checked again when the claims
+ *    changed (new copy): approved ones too, report only (their decision
+ *    stands; approveVideos refuses an approved video whose new report fails).
+ *    A report whose AI policy review was incomplete (`policy.ai_review` fail)
+ *    is re-run once automatically. A video that can no longer be resolved is
+ *    marked `checkError` and skipped.
  *
  * Bounded fan-out: at most MAX_RELATED_VIDEOS candidates per search,
- * MAX_CHECKS_PER_RUN checks per run, CHECK_CONCURRENCY at a time. Idempotent:
+ * MAX_CHECKS_PER_RUN checks per run, CHECK_CONCURRENCY at a time, and no new
+ * wave once CHECK_WAVES_BUDGET_MS has elapsed. Idempotent:
  * candidates are upserted on (product, tiktok_url) and each check is saved as
  * soon as it is done, so a retry only redoes what is missing. Skipped once the
  * GATE 3 videos part is approved (the choice is closed).
@@ -43,7 +47,7 @@ import type { Row } from "@/lib/tenant/scoped-db";
 
 import { buildCallContext } from "../call-context";
 import { TIKTOK_MEDIA_PROVIDER } from "./analyze";
-import { pageCopyVersion } from "../copy-version";
+import { claimsVersion, complianceClaims } from "../compliance-claims";
 import { gatePartStates } from "../gate-payloads";
 
 import type { StepEnv } from "./types";
@@ -54,8 +58,16 @@ type BrandRow = Row<typeof brand>;
 
 export const MAX_CHECKS_PER_RUN = 8;
 export const CHECK_CONCURRENCY = 3;
+/**
+ * No new wave of checks starts after this much time in one run (a wave can
+ * take up to the compliance timeout, about 120 s): the rest is left for the
+ * next run, so a step or a server action stays well under its limit.
+ */
+export const CHECK_WAVES_BUDGET_MS = 150_000;
 /** Extra results asked from the provider, to make up for duplicates. */
 const SEARCH_SLACK = 4;
+
+export { claimsVersion, complianceClaims };
 
 /** What the compliance check of one video ran against (stored in video.metadata). */
 export type VideoCheckMetadata = {
@@ -63,29 +75,42 @@ export type VideoCheckMetadata = {
   claimsVersion?: string;
   /** Set when the video could not be resolved or checked (no report then). */
   checkError?: string;
+  /**
+   * Claims version for which an incomplete AI review (`policy.ai_review`
+   * fail) was already re-run automatically (once per version).
+   */
+  aiReviewRetried?: string;
 };
-
-/** Ad texts and page highlights: what the video will run with. */
-export function complianceClaims(copy: PageCopy | null): string[] {
-  if (!copy) return [];
-  return [...copy.adTexts, ...copy.highlights].map((s) => s.trim()).filter(Boolean);
-}
-
-export function claimsVersion(claims: readonly string[]): string {
-  return pageCopyVersion({ claims })!;
-}
 
 function metaOf(row: VideoRow): Record<string, unknown> & VideoCheckMetadata {
   return (row.metadata ?? {}) as Record<string, unknown> & VideoCheckMetadata;
 }
 
-/** Pending videos whose report is missing or was made with other claims. */
+/** The report's AI policy review was incomplete (a model glitch, not a verdict). */
+export function hasIncompleteAiReview(report: ComplianceReport | null): boolean {
+  const rules: unknown = report?.rules;
+  return (
+    Array.isArray(rules) &&
+    rules.some(
+      (r: ComplianceReport["rules"][number]) =>
+        r.ruleId === "policy.ai_review" && r.verdict === "fail",
+    )
+  );
+}
+
+/**
+ * Videos due a check (rejected ones never are):
+ * - no report yet (and no check error), or a report made with other claims
+ *   (approved videos included: report only);
+ * - an incomplete AI review, re-run once per claims version.
+ */
 export function videosToCheck(rows: readonly VideoRow[], version: string): VideoRow[] {
   return rows.filter((r) => {
-    if (r.approval !== "pending") return false;
+    if (r.approval === "rejected") return false;
     const meta = metaOf(r);
     if (meta.claimsVersion !== version) return true;
-    return !r.compliance && !meta.checkError;
+    if (!r.compliance) return !meta.checkError;
+    return hasIncompleteAiReview(r.compliance) && meta.aiReviewRetried !== version;
   });
 }
 
@@ -194,6 +219,14 @@ async function checkOne(
     }
     compliance = result.data;
     metadata = { ...candidateMetadata(fresh), claimsVersion: input.version };
+    // The automatic re-run of an incomplete review happens once per version.
+    const prior = metaOf(target);
+    if (
+      prior.aiReviewRetried === input.version ||
+      (prior.claimsVersion === input.version && hasIncompleteAiReview(target.compliance))
+    ) {
+      metadata.aiReviewRetried = input.version;
+    }
   } catch (error) {
     // Gone, private or refused by the provider: nothing a retry can fix.
     const gone =
@@ -207,27 +240,48 @@ async function checkOne(
     metadata = { ...metaOf(target), claimsVersion: input.version, checkError };
   }
   assertNoMediaUrl(metadata);
-  // Only while still pending: a decision taken meanwhile keeps its report.
-  await db.update(video, { compliance, metadata }, (v) =>
-    and(eq(v.id, target.id), eq(v.approval, "pending")),
+  // Pending and approved videos get the new report (an approved one keeps
+  // its decision: report only); a rejection taken meanwhile keeps the old
+  // one. An approved video that could not be checked keeps its last report.
+  await db.update(
+    video,
+    target.approval === "approved" && !compliance ? { metadata } : { compliance, metadata },
+    (v) => and(eq(v.id, target.id), ne(v.approval, "rejected")),
   );
 }
 
-/** 2. Compliance checks of the pending candidates, bounded and resumable. */
+export type CheckVideosOptions = {
+  /** Check only these videos (e.g. the one a user just added). */
+  only?: readonly string[];
+  /** Check them even when their report is current (a reviewer's re-check). */
+  force?: boolean;
+  /** Wall clock in ms (tests). */
+  clock?: () => number;
+  /** No new wave after this much time (default CHECK_WAVES_BUDGET_MS). */
+  budgetMs?: number;
+};
+
+/** 2. Compliance checks of the due videos, bounded in count and time, and resumable. */
 export async function checkVideos(
   env: Pick<StepEnv, "ctx" | "integrations" | "metered">,
   row: ProductRow,
   brandRow: BrandRow,
   copy: PageCopy | null,
   call: CallContext,
+  options: CheckVideosOptions = {},
 ): Promise<{ checked: number; remaining: number }> {
+  const clock = options.clock ?? Date.now;
+  const started = clock();
+  const budgetMs = options.budgetMs ?? CHECK_WAVES_BUDGET_MS;
   const claims = complianceClaims(copy);
   const version = claimsVersion(claims);
   const rows = await env.ctx.db.select(video, {
     where: and(eq(video.productId, row.id), ne(video.approval, "rejected")),
     orderBy: (t) => t.createdAt,
   });
-  const due = videosToCheck(rows, version);
+  const only = options.only;
+  const scoped = only ? rows.filter((r) => only.includes(r.id)) : rows;
+  const due = options.force ? scoped : videosToCheck(scoped, version);
   const batch = due.slice(0, MAX_CHECKS_PER_RUN);
   const input = {
     claims,
@@ -237,15 +291,18 @@ export async function checkVideos(
   };
 
   let failure: unknown = null;
+  let checked = 0;
   for (let i = 0; i < batch.length; i += CHECK_CONCURRENCY) {
-    const results = await Promise.allSettled(
-      batch.slice(i, i + CHECK_CONCURRENCY).map((v) => checkOne(env, call, v, input)),
-    );
+    // Out of time: the rest is left for the next run.
+    if (i > 0 && clock() - started >= budgetMs) break;
+    const wave = batch.slice(i, i + CHECK_CONCURRENCY);
+    const results = await Promise.allSettled(wave.map((v) => checkOne(env, call, v, input)));
+    checked += wave.length;
     for (const r of results) if (r.status === "rejected") failure ??= r.reason;
     // Saved so far stays saved; the retry picks up the rest.
     if (failure) throw failure;
   }
-  return { checked: batch.length, remaining: due.length - batch.length };
+  return { checked, remaining: due.length - checked };
 }
 
 /**

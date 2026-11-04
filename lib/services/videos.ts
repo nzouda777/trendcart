@@ -24,13 +24,16 @@ import {
   video,
 } from "@/lib/db/schema";
 import { isShopifyMediaProcessing } from "@/lib/integrations/shopify/errors";
-import { isPostingAudited } from "@/lib/integrations/tiktok-posting/config";
+import { currencyDecimals } from "@/lib/integrations/tiktok-ads";
+import { isPostingAudited, PUBLISH_CLAIM_STALE_MS } from "@/lib/integrations/tiktok-posting/config";
 import { assertNoMediaUrl, candidateVideoFields } from "@/lib/media/candidates";
 import { deleteVideoMedia, shopifyVideoAlt, uploadApprovedVideo } from "@/lib/media/videos";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
 import { buildCallContext } from "@/lib/workflows/call-context";
-import { getConcurrencyLimiter, withWorkspaceSlot } from "@/lib/workflows/concurrency";
+import { advertiserBudget } from "@/lib/workflows/campaign-spec";
+
+import { getConcurrencyLimiter, tryLock, withWorkspaceSlot } from "@/lib/workflows/concurrency";
 import {
   evidenceOf,
   gatePartStates,
@@ -44,12 +47,14 @@ import { ConcurrencyLimitError } from "@/lib/workflows/retry";
 import { checkVideos } from "@/lib/workflows/steps/videos";
 
 import { idSchema } from "./brands";
+import { adAccountUnusableReason, dailyBudgetMinimum } from "./campaign-read";
 import { resolveIntegrations, resolveNow, resolvePipeline, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
 import {
   getShopifyCredentialsFor,
   getTikTokProfileTokens,
   markConnectionNeedsReauth,
+  USABLE_CONNECTION_STATUSES,
 } from "./internal/credentials";
 import { loadPipeline } from "./pipeline";
 import { enforceRebuildLimit } from "./rate-limit";
@@ -68,8 +73,12 @@ type VideoRow = Row<typeof video>;
 
 /** Videos a product may hold (candidates + user-supplied). */
 export const MAX_VIDEOS_PER_PRODUCT = 20;
-/** A post left "pending" longer than this (the process died) may be published again. */
-export const STALE_POST_CLAIM_MS = 5 * 60_000;
+/**
+ * A post left "pending" longer than this (the process died) may be published
+ * again. Equals the posting adapter's claim window (longer than its live
+ * publish lock), so a second click never races a publish still running.
+ */
+export const STALE_POST_CLAIM_MS = PUBLISH_CLAIM_STALE_MS;
 const MAX_CAPTION = 2200;
 
 const videoActionSchema = z.object({ productId: idSchema, videoId: idSchema });
@@ -121,13 +130,16 @@ function busy(error: unknown): never {
 
 /**
  * Approves one video for the product (GATE 3, videos part still open). Its
- * compliance report must exist and not be "fail". The video is marked
- * approved under the product lock (the claim: a concurrent approve does
- * nothing), then uploaded once to the Shopify product (fresh provider URL,
- * staged upload, workspace "upload" slot), and the media id and stable file
- * URL are stored with a `video.approve` audit entry. If the upload fails the
- * video goes back to its previous decision and the error is rethrown.
- * Approving an approved video whose upload was lost uploads it again.
+ * compliance report must exist and not be "fail". A per-video upload lock
+ * (Upstash, expires after LEASE_TTL_MS) makes a concurrent approve refuse
+ * with reason "upload_in_progress" instead of transferring twice. The video
+ * is marked approved under the product lock, then uploaded once to the
+ * Shopify product (fresh provider URL, staged upload, workspace "upload"
+ * slot), and the media id and stable file URL are stored with a
+ * `video.approve` audit entry. If the upload fails the video goes back to its
+ * previous decision and the error is rethrown; while Shopify is still
+ * processing it stays approved (reason "media_processing": approve again in a
+ * minute). Approving an approved video whose upload was lost uploads it again.
  */
 export async function approveVideo(
   ctx: WorkspaceContext,
@@ -136,6 +148,27 @@ export async function approveVideo(
 ): Promise<ProductPipelineDTO> {
   requirePermission(ctx, "gate:content_approval", "video:approve");
   const v = videoActionSchema.parse(input);
+  const limiter = deps.limiter ?? getConcurrencyLimiter();
+  const lock = await tryLock(limiter, `video-upload:${v.videoId}`);
+  if (!lock) {
+    throw new ServiceError(
+      "invalid_state",
+      "This video is already uploading to Shopify. It will show up in a moment.",
+      { reason: "upload_in_progress" },
+    );
+  }
+  try {
+    return await approveVideoLocked(ctx, v, deps);
+  } finally {
+    await lock.release().catch(() => undefined);
+  }
+}
+
+async function approveVideoLocked(
+  ctx: WorkspaceContext,
+  v: z.infer<typeof videoActionSchema>,
+  deps: ServiceDeps,
+): Promise<ProductPipelineDTO> {
   const integrations = resolveIntegrations(deps);
 
   const claim = await ctx.db.transaction(async (tx) => {
@@ -188,6 +221,7 @@ export async function approveVideo(
       throw new ServiceError(
         "invalid_state",
         "Shopify is still processing this video. Approve it again in a minute.",
+        { reason: "media_processing" },
       );
     }
     // Back to the previous decision, unless someone decided meanwhile.
@@ -311,25 +345,40 @@ const approveVideosSchema = z.object({
   productId: idSchema,
   /** TikTok Ads account for the campaign; optional when the brand has exactly one active. */
   adConnectionId: idSchema.optional(),
+  /**
+   * Required when the ad account bills in another currency than the brand:
+   * 1 brand unit = fxRate advertiser units, supplied by the user (Trendcart
+   * fetches no FX rates). Ignored when the currencies match.
+   */
+  fxRate: z.number().positive().finite().max(1_000_000).optional(),
   note: z.string().trim().max(2000).optional(),
 });
 
-const USABLE_CONNECTION: ReadonlySet<string> = new Set(["active", "expiring"]);
+const USABLE_CONNECTION = USABLE_CONNECTION_STATUSES;
 
 /**
  * GATE 3, videos part: the approved videos (each already on Shopify) are the
- * campaign's videos, and the TikTok Ads account is chosen. Recorded in
- * `approval` (payload { part: "videos", videoIds, adConnectionId }) and
- * audited `gate.approve`, under the product lock. When the page part is
- * approved too, the product moves to preparing_campaign in the same
- * transaction and the pipeline prepares the paused campaign.
+ * campaign's videos, and the TikTok Ads account is chosen. Owner and media
+ * buyer only (`campaign:create`): this picks the advertiser account the
+ * paused campaign is created on; creatives approve / reject single videos.
+ *
+ * Refused when an approved video's (re-)check now fails, when the ad
+ * account's currency is unknown (reconnect it), when it bills in another
+ * currency than the brand and no `fxRate` is given (invalid_input), and when
+ * the brand default test budget converted to the advertiser currency
+ * (amount x fxRate, 2 decimals) is under TikTok's daily minimum.
+ * Recorded in `approval` (payload { part: "videos", videoIds, adConnectionId,
+ * brandCurrency, advertiserCurrency, fxRate }) and audited `gate.approve`,
+ * under the product lock. When the
+ * page part is approved too, the product moves to preparing_campaign in the
+ * same transaction and the pipeline prepares the paused campaign.
  */
 export async function approveVideos(
   ctx: WorkspaceContext,
   input: z.input<typeof approveVideosSchema>,
   deps: ServiceDeps = {},
 ): Promise<ProductPipelineDTO> {
-  requirePermission(ctx, "gate:content_approval", "video:approve");
+  requirePermission(ctx, "gate:content_approval", "video:approve", "campaign:create");
   const v = approveVideosSchema.parse(input);
   const userId = ctx.actor.userId;
 
@@ -349,7 +398,16 @@ export async function approveVideos(
     if (approved.length === 0) {
       throw new ServiceError("precondition_failed", "Approve at least one video first.");
     }
+    // N13: approved videos are re-checked (report only) when the page copy
+    // changes; one that now fails cannot run.
+    if (approved.some((a) => a.compliance?.overall === "fail")) {
+      throw new ServiceError(
+        "precondition_failed",
+        "An approved video now fails the ad rules (checked again against the new page copy). Reject it first.",
+      );
+    }
 
+    const brandRow = await tx.getById(brand, row.brandId);
     const accounts = await tx.select(tiktokAdConnection, {
       where: eq(tiktokAdConnection.brandId, row.brandId),
       orderBy: (t) => t.createdAt,
@@ -361,12 +419,6 @@ export async function approveVideos(
         throw new ServiceError(
           "invalid_input",
           "This TikTok Ads account is not connected to the brand.",
-        );
-      }
-      if (!USABLE_CONNECTION.has(account.status)) {
-        throw new ServiceError(
-          "precondition_failed",
-          "This TikTok Ads account needs to be reconnected.",
         );
       }
     } else {
@@ -385,6 +437,37 @@ export async function approveVideos(
       }
       account = usable[0]!;
     }
+    const unusable = adAccountUnusableReason(account);
+    if (unusable) throw new ServiceError("precondition_failed", unusable);
+    const advertiserCurrency = account.currency!;
+    const brandCurrency = brandRow.currency;
+    let fxRate: number | null = null;
+    if (advertiserCurrency !== brandCurrency) {
+      if (v.fxRate === undefined) {
+        throw new ServiceError(
+          "invalid_input",
+          `This TikTok Ads account bills in ${advertiserCurrency} but the brand sells in ${brandCurrency}. Enter the exchange rate (1 ${brandCurrency} = ? ${advertiserCurrency}).`,
+        );
+      }
+      fxRate = v.fxRate;
+    }
+    if (brandRow.defaultTestBudget !== null && brandRow.defaultTestBudget > 0) {
+      const amount = advertiserBudget(
+        brandRow.defaultTestBudget,
+        fxRate ?? 1,
+        currencyDecimals(advertiserCurrency),
+      );
+      const min = dailyBudgetMinimum("ad_group", advertiserCurrency);
+      if (min !== undefined && amount < min) {
+        const brandPart = fxRate
+          ? `${brandRow.defaultTestBudget} ${brandCurrency} = ${amount} ${advertiserCurrency}`
+          : `${amount} ${advertiserCurrency}`;
+        throw new ServiceError(
+          "precondition_failed",
+          `The daily test budget (${brandPart}) is under TikTok's minimum of ${min} ${advertiserCurrency}. Raise the brand default test budget.`,
+        );
+      }
+    }
 
     const videoIds = approved.map((a) => a.id).slice(0, MAX_VIDEOS_PER_PRODUCT);
     const recorded = await recordGateDecision(tx, {
@@ -393,7 +476,15 @@ export async function approveVideos(
       userId,
       decision: "approved",
       note: v.note ?? null,
-      payload: { part: "videos", kind: "approve", videoIds, adConnectionId: account.id },
+      payload: {
+        part: "videos",
+        kind: "approve",
+        videoIds,
+        adConnectionId: account.id,
+        brandCurrency,
+        advertiserCurrency,
+        fxRate,
+      },
     });
     const complete = parts.page === "approved";
     if (complete) {
@@ -415,6 +506,9 @@ export async function approveVideos(
           approvalId: recorded.id,
           videoIds,
           adConnectionId: account.id,
+          brandCurrency,
+          advertiserCurrency,
+          fxRate,
           complete,
         },
       },
@@ -441,8 +535,9 @@ const addVideoSchema = z.object({
 /**
  * Adds a TikTok video supplied by a user (GATE 3, videos part open): resolved
  * through the data provider (metadata only is stored, origin "user_supplied")
- * and checked against the ad rules right away (metered). Rate-limited like a
- * rebuild (paid calls). Idempotent on the URL.
+ * and checked against the ad rules right away (metered): only this video, so
+ * the server action stays short (other due checks belong to the build step).
+ * Rate-limited like a rebuild (paid calls). Idempotent on the URL.
  */
 export async function addVideo(
   ctx: WorkspaceContext,
@@ -452,7 +547,6 @@ export async function addVideo(
   requirePermission(ctx, "gate:content_approval", "video:approve");
   const v = addVideoSchema.parse(input);
   const integrations = resolveIntegrations(deps);
-  const now = resolveNow(deps);
 
   const row = await ctx.db.getById(product, v.productId);
   await assertVideosOpen(ctx.db, row);
@@ -479,15 +573,29 @@ export async function addVideo(
   }
   const fields = candidateVideoFields(resolved);
   assertNoMediaUrl(fields.metadata);
-  await ctx.db.upsert(
+  const saved = await ctx.db.upsert(
     video,
     { productId: row.id, tiktokUrl: resolved.tiktokUrl, origin: "user_supplied", ...fields },
     { target: (t) => [t.productId, t.tiktokUrl], set: { thumbnailUrl: fields.thumbnailUrl } },
   );
 
+  await runChecks(ctx, row, call, deps, { only: [saved.id] });
+  return loadPipeline(ctx, row.id);
+}
+
+/** Compliance checks from a service (metered on the workspace AI cap). */
+async function runChecks(
+  ctx: WorkspaceContext,
+  row: ProductRow,
+  call: Awaited<ReturnType<typeof buildCallContext>>,
+  deps: ServiceDeps,
+  options: Parameters<typeof checkVideos>[5],
+) {
+  const integrations = resolveIntegrations(deps);
+  const now = resolveNow(deps);
   const brandRow = await ctx.db.getById(brand, row.brandId);
   const copy = row.pageCopy ? pageCopySchema.parse(row.pageCopy) : null;
-  await checkVideos(
+  return checkVideos(
     {
       ctx,
       integrations,
@@ -498,7 +606,36 @@ export async function addVideo(
     brandRow,
     copy,
     call,
+    options,
   );
+}
+
+/**
+ * Runs the compliance check of one video again (GATE 3, videos part open),
+ * e.g. after an incomplete AI review (`policy.ai_review` fail) or to refresh
+ * a report made against older ad texts. Pending and approved videos (an
+ * approved one keeps its decision: report only, and approveVideos refuses it
+ * if the new report fails); rejected ones are not checked. Creative and up,
+ * metered, rate-limited like a rebuild. Not audited: it decides nothing (the
+ * audit action list has no entry for it).
+ */
+export async function recheckVideo(
+  ctx: WorkspaceContext,
+  input: z.input<typeof videoActionSchema>,
+  deps: ServiceDeps = {},
+): Promise<ProductPipelineDTO> {
+  requirePermission(ctx, "gate:content_approval", "video:approve");
+  const v = videoActionSchema.parse(input);
+  const row = await ctx.db.getById(product, v.productId);
+  await assertVideosOpen(ctx.db, row);
+  const target = await loadVideoOf(ctx.db, row.id, v.videoId);
+  if (target.approval === "rejected") {
+    throw new ServiceError("invalid_state", "This video was rejected: it is not checked again.");
+  }
+  await enforceRebuildLimit(ctx.workspaceId, row.id, deps);
+
+  const call = await buildCallContext(ctx.db, row.brandId);
+  await runChecks(ctx, row, call, deps, { only: [target.id], force: true });
   return loadPipeline(ctx, row.id);
 }
 
@@ -597,12 +734,16 @@ export async function publishToProfile(
 
   try {
     const tokens = await getTikTokProfileTokens(ctx, profile.id);
+    // The brand proxy (if any) for the source reads from the Shopify URL.
+    const { proxyUrl } = await buildCallContext(ctx.db, row.brandId);
     const { publishId } = await integrations.tiktokPosting.publishVideoFromUrl({
       accessToken: tokens.accessToken,
       sourceUrl: target.shopifyFileUrl,
       caption,
       privacyLevel,
+      ...(proxyUrl ? { proxyUrl } : {}),
     });
+
     await ctx.db.transaction(async (tx) => {
       await tx.update(tiktokPost, { publishId, status: "processing" }, eq(tiktokPost.id, post.id));
       await writeAudit(

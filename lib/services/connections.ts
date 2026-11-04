@@ -130,6 +130,7 @@ function toTikTokAdDTO(r: Row<typeof tiktokAdConnection>, now?: Date): TikTokAdC
     brandId: r.brandId,
     advertiserId: r.advertiserId,
     name: r.name,
+    currency: r.currency,
     status: r.status,
     ...connectionHealth({ status: r.status, hasToken: !!r.accessTokenEnc, now }),
     createdAt: iso(r.createdAt),
@@ -311,6 +312,9 @@ export async function saveTikTokAdConnections(
       const id = existing?.id ?? crypto.randomUUID();
       const secrets = {
         name: adv.name,
+        // Billing currency (B1): budgets are spent in it. Null when TikTok did
+        // not report one: such an account is refused for campaigns.
+        currency: adv.currency ? adv.currency.toUpperCase() : null,
         accessTokenEnc: encrypt(v.accessToken, { aad: connectionAad.tiktokAdsAccessToken(id) }),
         status: "active" as const,
       };
@@ -332,6 +336,7 @@ export async function saveTikTokAdConnections(
             provider: "tiktok_ads",
             advertiserId: adv.advertiserId,
             brandId: row.brandId,
+            currency: row.currency,
             scopes: v.scopes,
           },
         },

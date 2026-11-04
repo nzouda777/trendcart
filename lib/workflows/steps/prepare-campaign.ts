@@ -29,6 +29,7 @@ import {
   tiktokAdConnection,
   video,
 } from "@/lib/db/schema";
+import { currencyDecimals } from "@/lib/integrations/tiktok-ads";
 import { ensureTikTokAdsVideo } from "@/lib/media/videos";
 import { ServiceError } from "@/lib/services/errors";
 import {
@@ -107,9 +108,21 @@ export const prepareCampaignStep: StepDefinition = {
       return {};
     }
 
+    const brandRow = await ctx.db.getById(brand, row.brandId);
+    // B1 (defence in depth; approveVideos refuses first): TikTok spends the
+    // budget in the advertiser currency, so the brand default is converted
+    // with the rate a human recorded at GATE 3 (no FX fetched).
+    if (!connection.currency) {
+      fatal("The TikTok Ads account's currency is unknown. Reconnect the ad account, then retry.");
+    }
+    const fxRate = connection.currency === brandRow.currency ? 1 : choice.fxRate;
+    if (!fxRate) {
+      fatal(
+        `The TikTok Ads account bills in ${connection.currency} but the brand sells in ${brandRow.currency}, and no exchange rate was recorded at GATE 3. Approve the videos again with a rate.`,
+      );
+    }
     const creds = await adsCredentials(ctx, connection.id);
     const landing = await landingPageUrl(ctx, row.id);
-    const brandRow = await ctx.db.getById(brand, row.brandId);
     const copy = row.pageCopy ? pageCopySchema.parse(row.pageCopy) : null;
 
     // 2. Videos on TikTok Ads, in the order they were approved.
@@ -145,6 +158,8 @@ export const prepareCampaignStep: StepDefinition = {
         country: brandRow.country,
         defaultTestBudget: brandRow.defaultTestBudget,
       },
+      fxRate,
+      budgetDecimals: currencyDecimals(connection.currency),
       landingPageUrl: landing,
       adTexts: copy?.adTexts ?? [],
       videos,
@@ -183,6 +198,10 @@ export const prepareCampaignStep: StepDefinition = {
             campaignId: ids.campaignId,
             ads: videos.length,
             budget: spec.budget,
+            currency: connection.currency,
+            brandCurrency: brandRow.currency,
+            fxRate: fxRate === 1 ? null : fxRate,
+
             status: "paused",
           },
         },

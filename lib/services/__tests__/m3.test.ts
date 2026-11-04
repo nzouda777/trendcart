@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { ForbiddenError } from "@/lib/auth/errors";
 import { encrypt } from "@/lib/crypto";
 import { IntegrationError, type Integrations } from "@/lib/domain/contracts";
 import {
+  approval,
   auditLog,
   brand,
   campaign,
@@ -37,6 +38,7 @@ import {
   approveVideo,
   approveVideos,
   publishToProfile,
+  recheckVideo,
   refreshTikTokPosts,
   rejectVideo,
 } from "../videos";
@@ -85,13 +87,17 @@ async function insertStore() {
   });
 }
 
-async function insertAdAccount(advertiserId = "7000000000000000001") {
+async function insertAdAccount(
+  advertiserId = "7000000000000000001",
+  currency: string | null = "EUR",
+) {
   const id = crypto.randomUUID();
   return env.a.owner.db.insert(tiktokAdConnection, {
     id,
     brandId,
     advertiserId,
     name: "Mock Ads Account EU",
+    currency,
     accessTokenEnc: encrypt("mock-ads-token-test", { aad: connectionAad.tiktokAdsAccessToken(id) }),
     status: "active",
   });
@@ -140,8 +146,8 @@ function mocks(overrides: Partial<Integrations> = {}) {
   };
 }
 
-/** Import → GATE 1 → GATE 2 → build (page + videos) → GATE 3, page approved. */
-async function atGate3PageApproved(m = mocks()) {
+/** Import → GATE 1 → GATE 2 → build (page + videos) → GATE 3, page not approved yet. */
+async function atGate3(m = mocks()) {
   await insertStore();
   const deps = testDeps(m.integrations);
   const imported = await importFromTikTok(env.a.creative, { url: nextTikTokUrl(), brandId }, deps);
@@ -153,10 +159,20 @@ async function atGate3PageApproved(m = mocks()) {
     { productId, supplierMatchId: suppliers[0]!.id, acceptLowMargin: true },
     deps,
   );
-  const atGate3 = await getProductPipeline(env.a.viewer, productId);
-  expect(atGate3.status).toBe("awaiting_content_approval");
-  await approvePage(env.a.creative, { productId, copyVersion: atGate3.pageCopyVersion! }, deps);
-  return { productId, deps, ...m };
+  const at3 = await getProductPipeline(env.a.viewer, productId);
+  expect(at3.status).toBe("awaiting_content_approval");
+  return { productId, deps, copyVersion: at3.pageCopyVersion!, ...m };
+}
+
+/** Same, page approved. */
+async function atGate3PageApproved(m = mocks()) {
+  const at3 = await atGate3(m);
+  await approvePage(
+    env.a.creative,
+    { productId: at3.productId, copyVersion: at3.copyVersion },
+    at3.deps,
+  );
+  return at3;
 }
 
 function usable(p: Awaited<ReturnType<typeof getProductPipeline>>) {
@@ -229,7 +245,7 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
     });
 
     // Videos part → preparing_campaign → paused campaign (inline) → GATE 4.
-    p = await approveVideos(env.a.creative, { productId }, deps);
+    p = await approveVideos(env.a.media_buyer, { productId }, deps);
     expect(p.status).toBe("ready_to_launch");
     expect(p.gate).toBe("launch");
     expect(p.videosChoice).toMatchObject({ videoIds: [first!.id], adConnectionId: adAccount.id });
@@ -302,10 +318,24 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
     p = await resumeCampaign(env.a.owner, { productId }, deps);
     expect(p.campaign!.status).toBe("active");
 
-    // Budget change needs adapter support (the mock has none).
+    // Budget change (N9): capped at 10x the brand default (30), amount only.
+    expect(p.campaign).toMatchObject({ budgetUpdatable: true, maxBudget: 300, currency: "EUR" });
     await expect(
-      updateCampaignBudget(env.a.media_buyer, { productId, amount: 50 }, deps),
-    ).rejects.toMatchObject({ code: "precondition_failed" });
+      updateCampaignBudget(env.a.media_buyer, { productId, amount: 301 }, deps),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    // TikTok refusing the amount changes nothing.
+    const refuse = vi.fn(async () => {
+      throw new IntegrationError("tiktok_ads", "invalid_input", "below the minimum");
+    });
+    await expect(
+      updateCampaignBudget(
+        env.a.media_buyer,
+        { productId, amount: 1 },
+        testDeps({ ...m.integrations, tiktokAds: { ...m.ads, updateBudget: refuse } }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    p = await getProductPipeline(env.a.viewer, productId);
+    expect(p.campaign!.config.budget.amount).toBe(30);
     const updateBudget = vi.fn(async () => undefined);
     p = await updateCampaignBudget(
       env.a.media_buyer,
@@ -314,6 +344,7 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
     );
     expect(p.campaign!.config.budget.amount).toBe(50);
     expect(updateBudget).toHaveBeenCalledTimes(1);
+
     expect(
       (await env.a.owner.db.select(auditLog)).some((a) => a.action === "campaign.budget_change"),
     ).toBe(true);
@@ -361,7 +392,7 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
     const { productId, deps } = m;
     const p0 = await getProductPipeline(env.a.viewer, productId);
     await approveVideo(env.a.creative, { productId, videoId: usable(p0)[0]!.id }, deps);
-    const ready = await approveVideos(env.a.creative, { productId }, deps);
+    const ready = await approveVideos(env.a.media_buyer, { productId }, deps);
     expect(ready.status).toBe("ready_to_launch");
     const ids = ready.campaign!.tiktokIds!;
 
@@ -385,12 +416,12 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
   it("refuses the videos part without an approved video or an ad account", async () => {
     const m = await atGate3PageApproved();
     const { productId, deps } = m;
-    await expect(approveVideos(env.a.creative, { productId }, deps)).rejects.toMatchObject({
+    await expect(approveVideos(env.a.media_buyer, { productId }, deps)).rejects.toMatchObject({
       code: "precondition_failed",
     });
     const p = await getProductPipeline(env.a.viewer, productId);
     await approveVideo(env.a.creative, { productId, videoId: usable(p)[0]!.id }, deps);
-    await expect(approveVideos(env.a.creative, { productId }, deps)).rejects.toMatchObject({
+    await expect(approveVideos(env.a.media_buyer, { productId }, deps)).rejects.toMatchObject({
       code: "precondition_failed",
     });
     const row = await env.a.owner.db.getById(product, productId);
@@ -409,4 +440,283 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
       ),
     ).toBe(1);
   }, 120_000);
+});
+
+describe("M3 QA fixes (B1, S1, S2, N1, N9, N13, S4)", () => {
+  it("B1: another currency needs an fxRate (budget converted, minimum checked); unknown is refused", async () => {
+    const usd = await insertAdAccount("7000000000000000002", "USD");
+    const unknown = await insertAdAccount("7000000000000000003", null);
+    const m = await atGate3PageApproved();
+    const { productId, deps } = m;
+    let p = await getProductPipeline(env.a.viewer, productId);
+    expect(p.currency).toBe("EUR");
+    const options = new Map(p.adAccounts.map((a) => [a.id, a]));
+    expect(options.get(usd.id)).toMatchObject({ currency: "USD", usable: true, needsFxRate: true });
+    expect(options.get(unknown.id)).toMatchObject({ currency: null, usable: false });
+    expect(options.get(unknown.id)!.unusableReason).toMatch(/Reconnect/);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p)[0]!.id }, deps);
+
+    await expect(
+      approveVideos(env.a.media_buyer, { productId, adConnectionId: unknown.id }, deps),
+    ).rejects.toMatchObject({ code: "precondition_failed" });
+    await expect(
+      approveVideos(env.a.media_buyer, { productId, adConnectionId: usd.id }, deps),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    // 30 EUR x 0.5 = 15 USD, under TikTok's 20 USD ad group daily minimum.
+    await expect(
+      approveVideos(env.a.media_buyer, { productId, adConnectionId: usd.id, fxRate: 0.5 }, deps),
+    ).rejects.toThrow(/30 EUR = 15 USD.*20 USD/);
+
+    p = await approveVideos(
+      env.a.media_buyer,
+      { productId, adConnectionId: usd.id, fxRate: 1.0837 },
+      deps,
+    );
+    expect(p.status).toBe("ready_to_launch");
+    expect(p.campaign).toMatchObject({
+      currency: "USD",
+      brandCurrency: "EUR",
+      fxRate: 1.0837,
+      minBudget: 20,
+      maxBudget: 325.11,
+      spendingUnknown: false,
+    });
+    expect(p.campaign!.config.budget.amount).toBe(32.51);
+    const videosPart = await env.a.owner.db.findFirst(
+      approval,
+      and(eq(approval.productId, productId), eq(approval.gate, "content_approval")),
+      { orderBy: (t) => desc(t.createdAt) },
+    );
+    expect(videosPart!.payload).toMatchObject({
+      part: "videos",
+      brandCurrency: "EUR",
+      advertiserCurrency: "USD",
+      fxRate: 1.0837,
+    });
+
+    // Budget changes are in USD, checked against the USD minimum.
+    await expect(
+      updateCampaignBudget(env.a.media_buyer, { productId, amount: 19 }, deps),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+
+    p = await launchCampaign(env.a.owner, { productId }, deps);
+    const gate4 = await env.a.owner.db.findFirst(
+      approval,
+      and(eq(approval.productId, productId), eq(approval.gate, "launch")),
+    );
+    expect(gate4!.payload).toMatchObject({
+      currency: "USD",
+      brandCurrency: "EUR",
+      amount: 32.51,
+      fxRate: 1.0837,
+    });
+  }, 120_000);
+
+  it("B1: a campaign in the brand currency has no conversion", async () => {
+    await insertAdAccount();
+    const m = await atGate3PageApproved();
+    const { productId, deps } = m;
+    const p0 = await getProductPipeline(env.a.viewer, productId);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p0)[0]!.id }, deps);
+    // A rate is ignored when the currencies match.
+    const p = await approveVideos(env.a.media_buyer, { productId, fxRate: 2 }, deps);
+    expect(p.campaign).toMatchObject({
+      currency: "EUR",
+      brandCurrency: "EUR",
+      fxRate: null,
+      totalsInBrandCurrency: null,
+    });
+    expect(p.campaign!.config.budget.amount).toBe(30);
+  }, 120_000);
+
+  it("S1: a creative cannot choose the ad account, nor complete GATE 3 with the page", async () => {
+    await insertAdAccount();
+    const m = await atGate3();
+    const { productId, deps } = m;
+    let p = await getProductPipeline(env.a.creative, productId);
+    expect(p.canChooseAdAccount).toBe(false);
+    expect((await getProductPipeline(env.a.media_buyer, productId)).canChooseAdAccount).toBe(true);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p)[0]!.id }, deps);
+    await expect(approveVideos(env.a.creative, { productId }, deps)).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
+    // Videos part first (media buyer); the page by a creative would then complete GATE 3.
+    p = await approveVideos(env.a.media_buyer, { productId }, deps);
+    expect(p.contentParts.videos).toBe("approved");
+    await expect(
+      approvePage(env.a.creative, { productId, copyVersion: m.copyVersion }, deps),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    p = await getProductPipeline(env.a.viewer, productId);
+    expect(p.contentParts.page).toBe("pending");
+    expect(p.shopify!.status).toBe("draft");
+    p = await approvePage(env.a.owner, { productId, copyVersion: m.copyVersion }, deps);
+    expect(p.status).toBe("ready_to_launch");
+  }, 120_000);
+
+  it("S2: a failed launch whose re-pause fails says so; pauseCampaign pauses it again", async () => {
+    await insertAdAccount();
+    const base = mocks();
+    const ads = base.ads;
+    let failLaunch = true;
+    let failPause = true;
+    const integrations: Integrations = {
+      ...base.integrations,
+      tiktokAds: {
+        ...ads,
+        launchCampaign: async (creds, ids) => {
+          if (failLaunch) {
+            failLaunch = false;
+            throw new IntegrationError("tiktok_ads", "provider_error", "upstream 500");
+          }
+          return ads.launchCampaign(creds, ids);
+        },
+        pauseCampaign: async (creds, ids) => {
+          if (failPause) {
+            failPause = false;
+            throw new IntegrationError("tiktok_ads", "provider_error", "pause timed out");
+          }
+          return ads.pauseCampaign(creds, ids);
+        },
+      },
+    };
+    const m = await atGate3PageApproved({ ...base, integrations });
+    const { productId, deps } = m;
+    const p0 = await getProductPipeline(env.a.viewer, productId);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p0)[0]!.id }, deps);
+    await approveVideos(env.a.media_buyer, { productId }, deps);
+
+    await expect(launchCampaign(env.a.owner, { productId }, deps)).rejects.toMatchObject({
+      code: "invalid_state",
+      reason: "launch_failed_not_paused",
+    });
+    let p = await getProductPipeline(env.a.viewer, productId);
+    expect(p.status).toBe("failed");
+    expect(p.failedStep).toBe("launch");
+    expect(p.campaign).toMatchObject({
+      status: "failed",
+      spendingUnknown: true,
+      budgetUpdatable: false,
+    });
+    const launchAudit = (await env.a.owner.db.select(auditLog)).find(
+      (a) => a.action === "campaign.launch",
+    );
+    expect(launchAudit!.metadata).toMatchObject({ outcome: "failed", reverted: false });
+
+    p = await pauseCampaign(env.a.media_buyer, { productId }, deps);
+    expect(p.campaign).toMatchObject({ status: "paused", spendingUnknown: false });
+    const retried = await retryStep(env.a.owner, productId, deps);
+    expect(retried.status).toBe("ready_to_launch");
+    p = await launchCampaign(env.a.owner, { productId }, deps);
+    expect(p.status).toBe("launched");
+  }, 120_000);
+
+  it("S2: a failed launch paused again says nothing is spending", async () => {
+    await insertAdAccount();
+    const base = mocks();
+    const integrations: Integrations = {
+      ...base.integrations,
+      tiktokAds: {
+        ...base.ads,
+        launchCampaign: async () => {
+          throw new IntegrationError("tiktok_ads", "provider_error", "upstream 500");
+        },
+      },
+    };
+    const m = await atGate3PageApproved({ ...base, integrations });
+    const { productId, deps } = m;
+    const p0 = await getProductPipeline(env.a.viewer, productId);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p0)[0]!.id }, deps);
+    await approveVideos(env.a.media_buyer, { productId }, deps);
+    const error = await launchCampaign(env.a.owner, { productId }, deps).catch((e: unknown) => e);
+    expect(error).toMatchObject({ reason: "launch_failed_paused" });
+    expect((error as Error).message).toMatch(/nothing is spending/);
+    const p = await getProductPipeline(env.a.viewer, productId);
+    expect(p.campaign).toMatchObject({ status: "paused", spendingUnknown: false });
+  }, 120_000);
+
+  it("N1: a concurrent approve of the same video uploads once", async () => {
+    const m = await atGate3PageApproved();
+    const { productId, deps } = m;
+    const p = await getProductPipeline(env.a.viewer, productId);
+    const videoId = usable(p)[0]!.id;
+    const results = await Promise.allSettled([
+      approveVideo(env.a.creative, { productId, videoId }, deps),
+      approveVideo(env.a.owner, { productId, videoId }, deps),
+    ]);
+    const refused = results.filter((r) => r.status === "rejected");
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toMatchObject({
+      reason: "upload_in_progress",
+    });
+    expect(m.attachVideoFromUrl).toHaveBeenCalledTimes(1);
+    // Once done, approving again is a no-op.
+    await approveVideo(env.a.creative, { productId, videoId }, deps);
+    expect(m.attachVideoFromUrl).toHaveBeenCalledTimes(1);
+  }, 120_000);
+
+  it("recheckVideo re-runs one check; an approved video now failing blocks the videos part (N13)", async () => {
+    await insertAdAccount();
+    const real = createIntegrations("mock").complianceChecker;
+    let failNext = false;
+    const check: Integrations["complianceChecker"]["check"] = async (...args) => {
+      const result = await real.check(...args);
+      if (!failNext) return result;
+      failNext = false;
+      return { ...result, data: { ...result.data, overall: "fail" as const } };
+    };
+    const spy = vi.fn(check);
+    const m = await atGate3PageApproved(mocks({ complianceChecker: { check: spy } }));
+    const { productId, deps } = m;
+    let p = await getProductPipeline(env.a.viewer, productId);
+    const [first, second] = usable(p);
+    await approveVideo(env.a.creative, { productId, videoId: first!.id }, deps);
+    await expect(
+      recheckVideo(env.a.viewer, { productId, videoId: first!.id }, deps),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    const before = spy.mock.calls.length;
+    failNext = true;
+    p = await recheckVideo(env.a.creative, { productId, videoId: first!.id }, deps);
+    expect(spy.mock.calls.length).toBe(before + 1);
+    expect(p.videos.find((v) => v.id === first!.id)).toMatchObject({
+      approval: "approved",
+      onShopify: true,
+      compliance: { overall: "fail" },
+      complianceOutdated: false,
+    });
+    await expect(approveVideos(env.a.media_buyer, { productId }, deps)).rejects.toMatchObject({
+      code: "precondition_failed",
+    });
+
+    // A rejected video is not checked again.
+    if (second) {
+      await rejectVideo(env.a.creative, { productId, videoId: second.id }, deps);
+      await expect(
+        recheckVideo(env.a.creative, { productId, videoId: second.id }, deps),
+      ).rejects.toMatchObject({ code: "invalid_state" });
+    }
+    // Checked again fine: it can run.
+    p = await recheckVideo(env.a.creative, { productId, videoId: first!.id }, deps);
+    expect(p.videos.find((v) => v.id === first!.id)!.compliance!.overall).not.toBe("fail");
+    p = await approveVideos(env.a.media_buyer, { productId }, deps);
+    expect(p.status).toBe("ready_to_launch");
+  }, 120_000);
+
+  it("S4: the stats run stops starting campaigns near its budget", async () => {
+    const refs = [1, 2, 3].map(() => ({
+      workspaceId: env.wsA,
+      campaignId: crypto.randomUUID(),
+    }));
+    const ticks = [0, 0, 0, 210_000];
+    let i = 0;
+    const getHourlyStats = vi.fn(async () => []);
+    const summary = await syncAllCampaignStats({
+      scan: async () => refs,
+      ads: { getHourlyStats } as unknown as Integrations["tiktokAds"],
+      context: (ws) => env.system(ws),
+      clock: () => ticks[Math.min(i++, ticks.length - 1)]!,
+    });
+    // Two started (unknown ids: nothing to sync), the third left for next hour.
+    expect(summary).toMatchObject({ scanned: 3, skipped: 2, deferred: 1, failed: 0 });
+  });
 });

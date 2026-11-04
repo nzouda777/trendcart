@@ -31,7 +31,18 @@ export type ServiceErrorCode =
  */
 export type ServiceErrorReason =
   /** approvePage: the stored page copy no longer has the version the reviewer loaded. */
-  "copy_changed";
+  | "copy_changed"
+  /** approveVideo: Shopify is still processing the uploaded video; approve again in a minute. */
+  | "media_processing"
+  /** approveVideo: another request is uploading this video right now. */
+  | "upload_in_progress"
+  /** launchCampaign failed and the campaign was paused again: nothing is spending. */
+  | "launch_failed_paused"
+  /**
+   * launchCampaign failed and pausing it again failed too: part of the
+   * campaign may be spending. Check TikTok Ads Manager, or use pauseCampaign.
+   */
+  | "launch_failed_not_paused";
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode;

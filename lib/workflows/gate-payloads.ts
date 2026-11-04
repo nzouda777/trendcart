@@ -150,9 +150,29 @@ export const videosPartPayloadSchema = z
     kind: z.literal("approve"),
     videoIds: z.array(z.string().min(1)).min(1).max(20),
     adConnectionId: z.string().min(1),
+    /** Brand (selling) currency at approval time (absent on rows before B1). */
+    brandCurrency: z
+      .string()
+      .regex(/^[A-Z]{3}$/)
+      .optional(),
+    /** Advertiser (billing) currency of the chosen ad account. */
+    advertiserCurrency: z
+      .string()
+      .regex(/^[A-Z]{3}$/)
+      .optional(),
+    /**
+     * Human-supplied rate when the two differ: 1 brand unit = fxRate advertiser
+     * units (Trendcart fetches no FX rates). Null when they are equal.
+     */
+    fxRate: z.number().positive().finite().nullable().optional(),
   })
   .passthrough();
 export type VideosPartPayload = z.infer<typeof videosPartPayloadSchema>;
+
+/** Rate from brand to advertiser currency recorded at GATE 3 (1 when equal or unknown). */
+export function campaignFxRate(choice: Pick<VideosPartPayload, "fxRate"> | null): number {
+  return choice?.fxRate ?? 1;
+}
 
 /** The GATE 3 videos part approval in force (latest decision on that part), or null. */
 export async function loadVideosChoice(

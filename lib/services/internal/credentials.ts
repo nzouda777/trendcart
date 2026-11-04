@@ -27,6 +27,13 @@ import type { ConnectionKind } from "../types";
  * work did. Never return their results to a client.
  */
 
+/**
+ * Connection statuses whose token still works: "expiring" only prompts a
+ * reconnect soon (same rule as Shopify stores), so services that accept it
+ * up front can also load its credentials.
+ */
+export const USABLE_CONNECTION_STATUSES: ReadonlySet<string> = new Set(["active", "expiring"]);
+
 function inactive(kind: string): never {
   throw new ServiceError(
     "precondition_failed",
@@ -88,7 +95,7 @@ export async function getTikTokAdsCredentials(
   connectionId: string,
 ): Promise<TikTokAdsCredentials> {
   const row = await ctx.db.getById(tiktokAdConnection, connectionId);
-  if (row.status !== "active" || !row.accessTokenEnc) inactive("TikTok Ads");
+  if (!USABLE_CONNECTION_STATUSES.has(row.status) || !row.accessTokenEnc) inactive("TikTok Ads");
   return {
     advertiserId: row.advertiserId,
     accessToken: decrypt(row.accessTokenEnc, { aad: connectionAad.tiktokAdsAccessToken(row.id) }),
@@ -105,7 +112,9 @@ export async function getTikTokProfileTokens(
   expiresAt: Date | null;
 }> {
   const row = await ctx.db.getById(tiktokProfileConnection, connectionId);
-  if (row.status !== "active" || !row.accessTokenEnc) inactive("TikTok profile");
+  if (!USABLE_CONNECTION_STATUSES.has(row.status) || !row.accessTokenEnc) {
+    inactive("TikTok profile");
+  }
   return {
     openId: row.openId,
     accessToken: decrypt(row.accessTokenEnc, {

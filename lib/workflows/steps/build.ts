@@ -18,6 +18,9 @@
  *    then createDraftProduct with idempotencyKey = product id (Shopify upserts
  *    on the `trendcart.product_id` custom ID), then shopify_product is
  *    upserted on (product, connection). Re-runs update the same draft.
+ *    When the page left a Trendcart-generated template for an existing one
+ *    (GATE 3 template change), the orphaned product.tc-<id>.json is deleted
+ *    from the theme, best effort, after the draft was switched.
  * 3. Videos (./videos.ts): gather related videos and run compliance checks
  *    (bounded fan-out), each idempotent on (product, tiktok_url).
  *
@@ -392,6 +395,49 @@ export async function syncShopifyDraft(
   return { ref, shopifyProduct: saved, imageUrls };
 }
 
+/**
+ * Whether the page was moved off a Trendcart-generated template (a GATE 3
+ * template change recorded `previousGeneratedSuffix`).
+ */
+async function leftGeneratedTemplate(db: ScopedDb, productId: string): Promise<boolean> {
+  const rows = await db.select(approval, {
+    where: and(
+      eq(approval.productId, productId),
+      eq(approval.gate, "content_approval"),
+      eq(approval.decision, "rejected"),
+    ),
+  });
+  return rows.some(
+    (r) => r.payload?.kind === "template" && typeof r.payload?.previousGeneratedSuffix === "string",
+  );
+}
+
+/**
+ * Best effort: deletes the product's generated theme template
+ * (product.tc-<product id>.json) from the store chosen at GATE 2. Shopify
+ * refuses while the product is ACTIVE and uses it; the call is idempotent.
+ * Used when the page moved to another template, when the product goes back
+ * to GATE 2, and when it is deleted while still a draft. Never after a failed
+ * publish (that one is retried). Failures are logged, never thrown.
+ */
+export async function deleteGeneratedTemplate(
+  ctx: WorkspaceContext,
+  integrations: Integrations,
+  input: { productId: string; connectionId: string; shopifyProductId?: string | null },
+): Promise<boolean> {
+  try {
+    const { creds } = await getShopifyCredentialsFor(ctx, integrations, input.connectionId);
+    const { deleted } = await integrations.shopify.deleteProductTemplate(creds, {
+      suffix: generatedTemplateSuffix(input.productId),
+      ...(input.shopifyProductId ? { productId: input.shopifyProductId } : {}),
+    });
+    return deleted;
+  } catch (error) {
+    console.error("[template] could not delete the generated product template", error);
+    return false;
+  }
+}
+
 export const buildStep: StepDefinition = {
   step: "build",
   limit: "ai",
@@ -432,7 +478,18 @@ export const buildStep: StepDefinition = {
       current = await generatePageTemplate(env, current, { choice, supplier, copy });
     }
 
-    await syncShopifyDraft(ctx, integrations, current, { choice, supplier, copy });
+    const synced = await syncShopifyDraft(ctx, integrations, current, { choice, supplier, copy });
+    if (
+      current.pageTemplate?.mode !== "generate" &&
+      (await leftGeneratedTemplate(ctx.db, row.id))
+    ) {
+      // The draft now uses another template: the generated one is orphaned.
+      await deleteGeneratedTemplate(ctx, integrations, {
+        productId: row.id,
+        connectionId: choice.shopifyConnectionId,
+        shopifyProductId: synced.ref.productId,
+      });
+    }
     await buildVideos(env, current, copy);
     return {};
   },

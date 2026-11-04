@@ -1,7 +1,8 @@
 /**
  * The paused TikTok campaign Trendcart prepares after GATE 3 (pure, tested):
  * one campaign, one ad group in the brand country, one ad per approved video,
- * the brand's default test budget per day on the ad group, lowest-cost
+ * the brand's default test budget per day on the ad group (converted to the
+ * advertiser currency with the rate recorded at GATE 3), lowest-cost
  * bidding, traffic to the published Shopify page, the page copy ad texts in
  * rotation, and a custom identity with the brand name. Spark Ads (creator
  * authorization codes) come later.
@@ -18,6 +19,13 @@ export type CampaignSpecInput = {
   productId: string;
   productName: string | null;
   brand: { name: string; country: string; defaultTestBudget: number | null };
+  /**
+   * 1 brand unit = fxRate advertiser units (human-supplied at GATE 3 when the
+   * ad account bills in another currency). Default 1.
+   */
+  fxRate?: number;
+  /** Decimal places of the advertiser currency (default 2). */
+  budgetDecimals?: number;
   /** Published Shopify product URL. */
   landingPageUrl: string;
   /** Page copy ad texts (≤ 100 chars each), used in rotation. */
@@ -41,11 +49,28 @@ export function campaignName(productId: string, productName: string | null): str
   return `${label} · TC-${productId.slice(0, 8)}`;
 }
 
+/** Money rounded to 2 decimals (TikTok budgets have at most two). */
+export const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * The brand default test budget in the advertiser currency (brand amount x
+ * fxRate), rounded to `decimals` (2 for most currencies; pass
+ * currencyDecimals(advertiser currency) so JPY-like currencies get 0).
+ */
+export function advertiserBudget(brandAmount: number, fxRate = 1, decimals = 2): number {
+  const f = 10 ** decimals;
+  return Math.round(brandAmount * fxRate * f) / f;
+}
+
 export function buildCampaignSpec(input: CampaignSpecInput): CampaignSpec {
-  const budget = input.brand.defaultTestBudget;
-  if (budget === null || !(budget > 0)) {
+  const brandBudget = input.brand.defaultTestBudget;
+  if (brandBudget === null || !(brandBudget > 0)) {
     fatal("Set a default test budget on the brand, then retry.");
   }
+  const budget = advertiserBudget(brandBudget, input.fxRate, input.budgetDecimals);
+
+  if (!(budget > 0)) fatal("The converted test budget is zero. Check the exchange rate.");
+
   if (input.videos.length === 0) fatal("No approved video to advertise.");
   const texts = input.adTexts.map((t) => clip(t, MAX_AD_TEXT)).filter(Boolean);
   if (texts.length === 0) texts.push(clip(input.productName ?? input.brand.name, MAX_AD_TEXT));

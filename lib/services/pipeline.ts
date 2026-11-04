@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { findUnsafeClaims, sanitizeDescriptionHtml } from "@/lib/ai/copy-safety";
 import { writeAudit } from "@/lib/audit";
-import { requirePermission } from "@/lib/auth/guards";
+import { hasPermission, requirePermission } from "@/lib/auth/guards";
 import { gatePermission } from "@/lib/auth/permissions";
 import {
   IntegrationError,
@@ -53,6 +53,7 @@ import { resolvePageTemplate } from "@/lib/workflows/page-template";
 import { applyProductEventTo } from "@/lib/workflows/product-status";
 import type { SupplierDetails } from "@/lib/workflows/steps/source";
 import {
+  deleteGeneratedTemplate,
   loadChosenSupplier,
   shopifyProductFields,
   syncShopifyDraft,
@@ -182,8 +183,8 @@ export async function loadPipeline(
 ): Promise<ProductPipelineDTO> {
   const detail = await loadDetail(ctx, productId);
   const row = await ctx.db.getById(product, productId);
+  const brandRow = await ctx.db.getById(brand, row.brandId);
   const [
-    brandRow,
     suppliers,
     choice,
     stores,
@@ -194,7 +195,6 @@ export async function loadPipeline(
     campaignDTO,
     launch,
   ] = await Promise.all([
-    ctx.db.getById(brand, row.brandId),
     ctx.db.select(supplierMatch, {
       where: eq(supplierMatch.productId, row.id),
       orderBy: (t) => [desc(t.selected), t.createdAt],
@@ -206,7 +206,7 @@ export async function loadPipeline(
     }),
     gatePartStates(ctx.db, row.id, "content_approval"),
     loadVideosChoice(ctx.db, row.id),
-    loadAdAccounts(ctx.db, row.brandId),
+    loadAdAccounts(ctx.db, row.brandId, brandRow.currency),
     loadProfiles(ctx.db, row.brandId),
     loadCampaignDTO(ctx, row.id, now),
     row.status === "ready_to_launch" ? runningLaunch(ctx.db, row.id, now) : null,
@@ -287,6 +287,7 @@ export async function loadPipeline(
     campaign: campaignDTO,
     launchClaim: launch ? { startedAt: launch.startedAt.toISOString(), stale: launch.stale } : null,
     postingAudited: isPostingAudited(),
+    canChooseAdAccount: hasPermission(ctx, "campaign:create"),
   };
 }
 
@@ -846,6 +847,11 @@ async function revertPageApproval(
  * If 2 or 3 fails: the product is set back to DRAFT, the approval is voided
  * (the gate reopens), page.publish_revert is audited, and the error is
  * rethrown.
+ *
+ * When the videos part is already approved, this approval completes GATE 3
+ * and so starts the paused campaign on the chosen ad account: it then also
+ * needs `campaign:create` (owner, media buyer), checked in the claim before
+ * anything is published.
  */
 export async function approvePage(
   ctx: WorkspaceContext,
@@ -869,7 +875,11 @@ export async function approvePage(
         eq(approval.id, stale.id),
       );
     }
-    await assertPageOpen(tx, row);
+    const parts = await assertPageOpen(tx, row);
+    if (parts.videos === "approved") {
+      // Completes GATE 3, which creates the campaign on the chosen ad account.
+      requirePermission(ctx, "campaign:create");
+    }
     const copy = requireCopy(row);
     if (pageCopyVersion(row.pageCopy) !== v.copyVersion) {
       throw new ServiceError("invalid_state", "The page changed since you loaded it.", {
@@ -1011,7 +1021,16 @@ async function sendPageBack(
       userId,
       decision: "rejected",
       note: v.note ?? null,
-      payload: { part: "page", kind, previousCopy: row.pageCopy },
+      payload: {
+        part: "page",
+        kind,
+        previousCopy: row.pageCopy,
+        // Lets the build step delete the generated template once the draft
+        // uses the new one.
+        ...(kind === "template" && row.pageTemplate?.generated
+          ? { previousGeneratedSuffix: row.pageTemplate.generated.suffix }
+          : {}),
+      },
     });
     await applyProductEventTo(
       tx,
@@ -1227,6 +1246,7 @@ export async function goBackOneStep(
   }
   requirePermission(ctx, gatePermission(gateForStatus(target)!));
   await enforceRebuildLimit(ctx.workspaceId, current.id, deps);
+  const choice = await loadSupplierChoice(ctx.db, current.id);
 
   const from = await ctx.db.transaction(async (tx) => {
     const row = await lockProduct(tx, v.productId);
@@ -1292,6 +1312,23 @@ export async function goBackOneStep(
     );
     return row.status;
   });
+
+  // Back to GATE 2: the generated template of the abandoned page (still a
+  // draft) goes, best effort; a new choice designs a new one if asked.
+  if (target === "awaiting_supplier_choice" && current.pageTemplate?.generated && choice) {
+    const page = await ctx.db.findFirst(
+      shopifyProduct,
+      and(
+        eq(shopifyProduct.productId, current.id),
+        eq(shopifyProduct.connectionId, choice.shopifyConnectionId),
+      ),
+    );
+    await deleteGeneratedTemplate(ctx, resolveIntegrations(deps), {
+      productId: current.id,
+      connectionId: choice.shopifyConnectionId,
+      shopifyProductId: page?.shopifyProductId ?? null,
+    });
+  }
 
   await resolvePipeline(deps).wakeAfterStepBack(ctx, v.productId, from);
   return loadPipeline(ctx, v.productId);
