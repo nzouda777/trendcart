@@ -468,7 +468,15 @@ export interface ShopifyClient {
   /** Streams a video from `sourceUrl` into a staged upload, attaches it and waits until READY. */
   attachVideoFromUrl(
     creds: ShopifyCredentials,
-    input: { productId: string; sourceUrl: string; alt?: string },
+    input: {
+      productId: string;
+      sourceUrl: string;
+      alt?: string;
+      /** Stable per Trendcart video (use video.id) so a re-run never adds a second copy. */
+      idempotencyKey?: string;
+      /** Brand proxy for the source fetch. */
+      proxyUrl?: string;
+    },
   ): Promise<ShopifyMediaRef>;
   deleteProductMedia(
     creds: ShopifyCredentials,
@@ -579,6 +587,16 @@ export interface TikTokAdsClient {
   /** Enables everything in `ids`. Only called by the launch service after GATE 4. */
   launchCampaign(creds: TikTokAdsCredentials, ids: CampaignIds): Promise<void>;
   pauseCampaign(creds: TikTokAdsCredentials, ids: CampaignIds): Promise<void>;
+  /**
+   * Optional (added in M3, additive): sets a new budget amount on the
+   * entities that carry it (`budget.level`: the campaign or every ad group in
+   * `ids`). Never changes their operation status. Adapters without it make
+   * the budget-change service answer "not supported yet".
+   */
+  updateBudget?(
+    creds: TikTokAdsCredentials,
+    input: { ids: CampaignIds; budget: CampaignSpec["budget"] },
+  ): Promise<void>;
   getHourlyStats(
     creds: TikTokAdsCredentials,
     input: { campaignId: string; from: string; to: string },
@@ -857,6 +875,11 @@ export interface ComplianceChecker {
       claims: string[];
       productCategory: string;
       countries: string[];
+      /**
+       * Fresh media URL from `TikTokDataProvider.resolveVideo`, used only for
+       * the visual review (streamed to Gemini Files). Never stored.
+       */
+      mediaUrl?: string;
     },
   ): Promise<Metered<ComplianceReport>>;
 }
