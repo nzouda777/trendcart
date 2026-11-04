@@ -503,12 +503,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
   ): Promise<T> {
     assertCreatesDisabled(kind, body);
     // Campaign and ad group creates carry a request_id: safe to retry.
-    return call(
-      creds,
-      { method: "POST", path: `${kind}/create/`, body },
-      schema,
-      kind !== "ad",
-    );
+    return call(creds, { method: "POST", path: `${kind}/create/`, body }, schema, kind !== "ad");
   }
 
   async function setStatus(
@@ -535,8 +530,18 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
   async function disableAll(creds: TikTokAdsCredentials, ids: CampaignIds) {
     // Campaign first: one call stops every delivery under it.
     await setStatus(creds, "campaign", [ids.campaignId], "DISABLE");
-    await setStatus(creds, "adgroup", ids.adGroups.map((g) => g.adGroupId), "DISABLE");
-    await setStatus(creds, "ad", ids.adGroups.flatMap((g) => g.adIds), "DISABLE");
+    await setStatus(
+      creds,
+      "adgroup",
+      ids.adGroups.map((g) => g.adGroupId),
+      "DISABLE",
+    );
+    await setStatus(
+      creds,
+      "ad",
+      ids.adGroups.flatMap((g) => g.adIds),
+      "DISABLE",
+    );
   }
 
   /** Every id in `ids` must exist under `ids.campaignId` (like the mock's known-ids check). */
@@ -802,8 +807,18 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
       await assertIdsBelong(creds, ids);
       // Bottom-up: ads, then ad groups, the campaign last. Delivery starts
       // only when all three levels are enabled, so it starts complete.
-      await setStatus(creds, "ad", ids.adGroups.flatMap((g) => g.adIds), "ENABLE");
-      await setStatus(creds, "adgroup", ids.adGroups.map((g) => g.adGroupId), "ENABLE");
+      await setStatus(
+        creds,
+        "ad",
+        ids.adGroups.flatMap((g) => g.adIds),
+        "ENABLE",
+      );
+      await setStatus(
+        creds,
+        "adgroup",
+        ids.adGroups.map((g) => g.adGroupId),
+        "ENABLE",
+      );
       await setStatus(creds, "campaign", [ids.campaignId], "ENABLE");
     },
 

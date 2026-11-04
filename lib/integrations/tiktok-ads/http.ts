@@ -56,12 +56,10 @@ export class TikTokAdsApiError extends IntegrationError {
 export function quoteBigIds(text: string): string {
   const scalar = /("[A-Za-z0-9_]*_ids?"\s*:\s*)(-?\d{16,})(?=\s*[,}\]])/g;
   const array = /("[A-Za-z0-9_]*_ids?"\s*:\s*\[)([^\]]*)\]/g;
-  return text
-    .replace(scalar, '$1"$2"')
-    .replace(array, (_m, head: string, body: string) => {
-      const quoted = body.replace(/(^|,)(\s*)(-?\d{16,})(\s*)(?=,|$)/g, '$1$2"$3"$4');
-      return `${head}${quoted}]`;
-    });
+  return text.replace(scalar, '$1"$2"').replace(array, (_m, head: string, body: string) => {
+    const quoted = body.replace(/(^|,)(\s*)(-?\d{16,})(\s*)(?=,|$)/g, '$1$2"$3"$4');
+    return `${head}${quoted}]`;
+  });
 }
 
 /**

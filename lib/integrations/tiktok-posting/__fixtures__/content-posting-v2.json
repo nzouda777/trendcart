@@ -1,0 +1,49 @@
+{
+  "_comment": "Content Posting API v2 responses shaped after developers.tiktok.com (creator_info/query, video/init, status/fetch). Fake ids.",
+  "creator_info_private": {
+    "data": {
+      "creator_avatar_url": "https://p16.tiktokcdn.com/avatar.jpg",
+      "creator_username": "trendcart_test",
+      "creator_nickname": "Trendcart Test",
+      "privacy_level_options": ["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"],
+      "comment_disabled": false,
+      "duet_disabled": true,
+      "stitch_disabled": true,
+      "max_video_post_duration_sec": 600
+    },
+    "error": { "code": "ok", "message": "", "log_id": "20261104000000creator" }
+  },
+  "creator_info_no_private": {
+    "data": {
+      "creator_nickname": "Public Only",
+      "privacy_level_options": ["PUBLIC_TO_EVERYONE"],
+      "comment_disabled": false,
+      "duet_disabled": false,
+      "stitch_disabled": false,
+      "max_video_post_duration_sec": 60
+    },
+    "error": { "code": "ok", "message": "", "log_id": "l" }
+  },
+  "creator_info_spam": {
+    "data": {},
+    "error": { "code": "spam_risk_too_many_posts", "message": "daily cap", "log_id": "l" }
+  },
+  "video_init": {
+    "data": {
+      "publish_id": "v_pub_file~v2-1.7431234567890123456",
+      "upload_url": "https://open-upload.tiktokapis.com/video/?upload_id=67890&upload_token=Xza123"
+    },
+    "error": { "code": "ok", "message": "", "log_id": "20261104000000init" }
+  },
+  "status_processing": {
+    "data": { "status": "PROCESSING_UPLOAD", "uploaded_bytes": 10485760 },
+    "error": { "code": "ok", "message": "", "log_id": "l" }
+  },
+  "status_failed": {
+    "data": { "status": "FAILED", "fail_reason": "duration_check_failed" },
+    "error": { "code": "ok", "message": "", "log_id": "l" }
+  },
+  "status_invalid": {
+    "error": { "code": "invalid_publish_id", "message": "publish_id does not exist", "log_id": "l" }
+  }
+}

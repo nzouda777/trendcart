@@ -4,7 +4,6 @@ import { z } from "zod";
 
 import {
   campaignIdsSchema,
-  campaignSpecSchema,
   IntegrationError,
   oauthStartSchema,
   tiktokAdsCredentialsSchema,
@@ -15,6 +14,8 @@ import {
 } from "@/lib/domain/contracts";
 
 import { TIKTOK_ADS_PROVIDER } from "./config";
+import { statsWindow } from "./report";
+import { validateSpecForTikTok } from "./spec";
 
 /*
  * Deterministic in-memory TikTok Ads. Never touches the network.
@@ -22,6 +23,11 @@ import { TIKTOK_ADS_PROVIDER } from "./config";
  * buildAuthUrl points straight back at our own callback with a fake code,
  * so the connect flow completes locally in mock mode. Same inputs always
  * give the same ids and stats.
+ *
+ * Mirrors live: specs go through the same validateSpecForTikTok (so a spec
+ * the live API would reject fails here too), re-creating the same spec
+ * returns the same ids without touching their status (live reuses by name),
+ * launch needs ids created here first, and stats are one row per UTC hour.
  */
 
 export const MOCK_ADS_AUTH_CODE = "mock-ads-auth-code";
@@ -57,7 +63,6 @@ function numericId(prefix: string, len: number, ...parts: string[]): string {
 }
 
 const HOUR_MS = 3_600_000;
-const MAX_HOURS = 24 * 31;
 
 export type MockEntityStatus = "DISABLE" | "ENABLE";
 
@@ -122,7 +127,7 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
 
     async createPausedCampaign(creds, rawSpec) {
       const c = tiktokAdsCredentialsSchema.parse(creds);
-      const spec = campaignSpecSchema.parse(rawSpec);
+      const spec = validateSpecForTikTok(rawSpec);
       const campaignId = numericId("17", 19, c.advertiserId, spec.name);
       const ids = campaignIdsSchema.parse({
         campaignId,
@@ -140,14 +145,24 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
         ids.campaignId,
         ...ids.adGroups.flatMap((g) => [g.adGroupId, ...g.adIds]),
       ]) {
-        statuses.set(id, "DISABLE");
+        // Like live's name lookup: an existing entity keeps its status.
+        if (!statuses.has(id)) statuses.set(id, "DISABLE");
       }
       return ids;
     },
 
     async launchCampaign(creds, rawIds) {
       tiktokAdsCredentialsSchema.parse(creds);
-      for (const id of assertKnown(campaignIdsSchema.parse(rawIds))) statuses.set(id, "ENABLE");
+      const ids = campaignIdsSchema.parse(rawIds);
+      if (ids.adGroups.length === 0 || ids.adGroups.some((g) => g.adIds.length === 0)) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          "A campaign needs at least one ad group with ads to launch.",
+          { retryable: false },
+        );
+      }
+      for (const id of assertKnown(ids)) statuses.set(id, "ENABLE");
     },
 
     async pauseCampaign(creds, rawIds) {
@@ -160,15 +175,11 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
       const { campaignId, from, to } = z
         .object({ campaignId: z.string().min(1), from: z.iso.datetime(), to: z.iso.datetime() })
         .parse(input);
-      const start = Math.floor(Date.parse(from) / HOUR_MS) * HOUR_MS;
-      const end = Date.parse(to);
-      if (end < start) {
-        throw new IntegrationError(TIKTOK_ADS_PROVIDER, "invalid_input", "`to` is before `from`.");
-      }
+      const { start, end } = statsWindow(from, to);
       // A campaign never launched in this mock spends nothing.
       const neverLaunched = statuses.get(campaignId) === "DISABLE";
       const stats: HourlyStat[] = [];
-      for (let t = start; t < end && stats.length < MAX_HOURS; t += HOUR_MS) {
+      for (let t = start; t < end; t += HOUR_MS) {
         const hour = new Date(t).toISOString();
         if (neverLaunched) {
           stats.push({ hour, spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0 });

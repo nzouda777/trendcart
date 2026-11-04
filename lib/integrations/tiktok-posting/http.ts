@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { IntegrationError, type IntegrationErrorCode } from "@/lib/domain/contracts";
 
+import { quoteBigIds } from "../tiktok-ads/http";
+
 import { TIKTOK_POSTING_PROVIDER } from "./config";
 
 /*
@@ -86,7 +88,10 @@ export function mapPostingError(code: string, httpStatus: number): IntegrationEr
     return "permission_denied";
   if (code === "rate_limit_exceeded" || httpStatus === 429) return "rate_limited";
   if (code.startsWith("spam_risk") || code === "reached_active_user_cap") return "quota_exceeded";
-  if (code === "invalid_publish_id") return "not_found";
+  if (code === "invalid_publish_id" || code === "token_not_authorized_for_specified_publish_id")
+    return "not_found";
+  if (code === "privacy_level_option_mismatch" || code === "url_ownership_unverified")
+    return "permission_denied";
   if (httpStatus >= 500 || code === "internal_error") return "provider_error";
   return "invalid_input";
 }
@@ -118,7 +123,14 @@ export async function postingJson<T>(
     },
     body: JSON.stringify(body ?? {}),
   });
-  const env = postingEnvelopeSchema.safeParse(await res.json().catch(() => null));
+  // publicaly_available_post_id is a list of int64: keep it exact.
+  let json: unknown = null;
+  try {
+    json = JSON.parse(quoteBigIds(await res.text()));
+  } catch {
+    json = null;
+  }
+  const env = postingEnvelopeSchema.safeParse(json);
   if (!env.success) {
     throw providerError(
       res.status === 429 ? "rate_limited" : "provider_error",

@@ -1,0 +1,229 @@
+{
+  "_comment": "Marketing API v1.3 response envelopes, shaped after TikTok's official Business API SDK models (github.com/tiktok/tiktok-business-api-sdk). Ids are fake. int64 ids are strings here because JSON imports round them; raw-text replies in the tests cover ids sent as JSON numbers.",
+  "video_upload": {
+    "code": 0,
+    "message": "OK",
+    "request_id": "202611040000000001",
+    "data": [
+      {
+        "video_id": "v10033g50000ctestvideo0001",
+        "file_name": "trendcart-video-1.mp4",
+        "format": "mp4",
+        "duration": 18.4,
+        "displayable": true
+      }
+    ]
+  },
+  "video_info": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "video_id": "v10033g50000ctestvideo0001",
+          "video_cover_url": "https://p16-sign-va.tiktokcdn.com/cover-1.jpg",
+          "displayable": true
+        }
+      ]
+    }
+  },
+  "video_info_processing": {
+    "code": 0,
+    "message": "OK",
+    "data": { "list": [{ "video_id": "v10033g50000ctestvideo0001", "video_cover_url": null }] }
+  },
+  "image_upload": {
+    "code": 0,
+    "message": "OK",
+    "data": { "image_id": "ad-site-i18n-sg/20261104cover0001", "width": 720, "height": 1280 }
+  },
+  "identity_get_empty": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "identity_list": [],
+      "page_info": { "page": 1, "page_size": 100, "total_number": 0, "total_page": 0 }
+    }
+  },
+  "identity_get_brand": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "identity_list": [
+        {
+          "identity_id": "7300000000000000777",
+          "identity_type": "CUSTOMIZED_USER",
+          "display_name": "Brand"
+        }
+      ],
+      "page_info": { "page": 1, "page_size": 100, "total_number": 1, "total_page": 1 }
+    }
+  },
+  "identity_create": {
+    "code": 0,
+    "message": "OK",
+    "data": { "identity_id": "7300000000000000888" }
+  },
+  "tt_video_authorize": { "code": 0, "message": "OK", "data": {} },
+  "tt_video_authorize_already": {
+    "code": 40002,
+    "message": "The video has been authorized",
+    "data": {}
+  },
+  "tt_video_info": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "item_info": { "item_id": "7431234567890123456", "text": "creator post" },
+      "user_info": { "identity_id": "creator-identity-1", "display_name": "Creator" }
+    }
+  },
+  "campaign_get_empty": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [],
+      "page_info": { "page": 1, "page_size": 100, "total_number": 0, "total_page": 0 }
+    }
+  },
+  "campaign_create": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "campaign_id": "1812345678901234567",
+      "campaign_name": "Test campaign",
+      "operation_status": "DISABLE"
+    }
+  },
+  "adgroup_create": {
+    "code": 0,
+    "message": "OK",
+    "data": { "adgroup_id": "1812345678901234600", "operation_status": "DISABLE" }
+  },
+  "ad_create_1": {
+    "code": 0,
+    "message": "OK",
+    "data": { "ad_ids": ["1812345678901234701"], "creatives": [] }
+  },
+  "ad_create_2": {
+    "code": 0,
+    "message": "OK",
+    "data": { "ad_ids": ["1812345678901234702"], "creatives": [] }
+  },
+  "campaign_get_created": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "campaign_id": "1812345678901234567",
+          "campaign_name": "Test campaign",
+          "operation_status": "DISABLE"
+        }
+      ],
+      "page_info": { "page": 1, "total_page": 1 }
+    }
+  },
+  "adgroup_get_created": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "adgroup_id": "1812345678901234600",
+          "adgroup_name": "FR broad",
+          "campaign_id": "1812345678901234567",
+          "operation_status": "DISABLE"
+        }
+      ],
+      "page_info": { "page": 1, "total_page": 1 }
+    }
+  },
+  "ad_get_created": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "ad_id": "1812345678901234701",
+          "ad_name": "Ad 1",
+          "adgroup_id": "1812345678901234600",
+          "campaign_id": "1812345678901234567",
+          "operation_status": "DISABLE"
+        },
+        {
+          "ad_id": "1812345678901234702",
+          "ad_name": "Ad 2",
+          "adgroup_id": "1812345678901234600",
+          "campaign_id": "1812345678901234567",
+          "operation_status": "DISABLE"
+        }
+      ],
+      "page_info": { "page": 1, "total_page": 1 }
+    }
+  },
+  "status_update": { "code": 0, "message": "OK", "data": { "status": "ENABLE" } },
+  "advertiser_info_paris": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "advertiser_id": "7000000000000000001",
+          "name": "Sandbox EU",
+          "currency": "EUR",
+          "timezone": "Etc/GMT-1",
+          "display_timezone": "Europe/Paris"
+        }
+      ]
+    }
+  },
+  "report_page_1": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "dimensions": {
+            "campaign_id": "1812345678901234567",
+            "stat_time_hour": "2026-10-01 02:00:00"
+          },
+          "metrics": {
+            "spend": "1.50",
+            "impressions": "300",
+            "clicks": "6",
+            "conversion": "1",
+            "total_complete_payment_rate": "29.90",
+            "complete_payment_roas": "19.93"
+          }
+        }
+      ],
+      "page_info": { "page": 1, "page_size": 1000, "total_number": 2, "total_page": 2 }
+    }
+  },
+  "report_page_2": {
+    "code": 0,
+    "message": "OK",
+    "data": {
+      "list": [
+        {
+          "dimensions": {
+            "campaign_id": "1812345678901234567",
+            "stat_time_hour": "2026-10-01 04:00:00"
+          },
+          "metrics": {
+            "spend": "2.00",
+            "impressions": "500",
+            "clicks": "10",
+            "conversion": "2",
+            "total_complete_payment_rate": "0",
+            "complete_payment_roas": "10"
+          }
+        }
+      ],
+      "page_info": { "page": 2, "page_size": 1000, "total_number": 2, "total_page": 2 }
+    }
+  },
+  "rate_limited": { "code": 40100, "message": "Too many requests", "request_id": "rl" },
+  "system_error": { "code": 50000, "message": "System error", "request_id": "se" }
+}

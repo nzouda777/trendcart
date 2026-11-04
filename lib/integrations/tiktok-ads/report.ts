@@ -144,12 +144,18 @@ export function foldHourlyStats(
   start: number,
   end: number,
 ): HourlyStat[] {
-  const acc = new Map<number, { spend: number; imp: number; clk: number; conv: number; rev: number }>();
+  const acc = new Map<
+    number,
+    { spend: number; imp: number; clk: number; conv: number; rev: number }
+  >();
   for (const r of rows) {
     const t = Math.floor(localToUtc(tz, r.dimensions.stat_time_hour) / HOUR_MS) * HOUR_MS;
     if (t < start || t >= end) continue;
     const m = r.metrics;
-    const revenue = m.total_complete_payment_rate > 0 ? m.total_complete_payment_rate : m.spend * m.complete_payment_roas;
+    const revenue =
+      m.total_complete_payment_rate > 0
+        ? m.total_complete_payment_rate
+        : m.spend * m.complete_payment_roas;
     const a = acc.get(t) ?? { spend: 0, imp: 0, clk: 0, conv: 0, rev: 0 };
     a.spend += m.spend;
     a.imp += m.impressions;

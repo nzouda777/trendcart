@@ -7,6 +7,8 @@ import {
   tiktokCreatorInfoSchema,
   tiktokPrivacyLevelSchema,
   tiktokProfileTokenSchema,
+  tiktokPublishStatusSchema,
+  IntegrationError,
   type OAuthStart,
   type TikTokCreatorInfo,
   type TikTokPostingClient,
@@ -15,7 +17,7 @@ import {
 } from "@/lib/domain/contracts";
 
 import { getRateLimiter, keyForSecret, type RateLimiter } from "../tiktok-ads/rate-limit";
-import { assertNotUnderTest, NotImplementedIntegrationError, type Env } from "../tiktok-ads/safety";
+import { assertNotUnderTest, realSleep, type Env } from "../tiktok-ads/safety";
 
 import {
   assertPrivacyAllowed,
@@ -25,14 +27,51 @@ import {
   readLoginConfig,
   TIKTOK_POSTING_PROVIDER,
 } from "./config";
+import { planChunks } from "./chunks";
 import { oauthForm, postingJson } from "./http";
+import { probeSource, transferChunks } from "./upload";
 
 export type LiveTikTokPostingOptions = {
   fetch?: typeof fetch;
   env?: Env;
   rateLimiter?: RateLimiter;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Test-only: lets publishVideoFromUrl run under vitest when `fetch` is an
+   * injected stub (never the global fetch). SELF_ONLY only: the app never
+   * counts as audited under test. Ignored outside tests.
+   */
+  allowStubbedSideEffectsUnderTest?: boolean;
 };
+
+const publishInputSchema = z.object({
+  accessToken: z.string().min(1),
+  sourceUrl: z.url(),
+  /** TikTok title: at most 2200 UTF-16 code units. */
+  caption: z.string().max(2200),
+  privacyLevel: tiktokPrivacyLevelSchema,
+});
+
+const initDataSchema = z.object({
+  publish_id: z.string().min(1).max(64),
+  upload_url: z.url(),
+});
+
+const statusDataSchema = z.object({
+  status: z.enum([
+    "PROCESSING_UPLOAD",
+    "PROCESSING_DOWNLOAD",
+    "SEND_TO_USER_INBOX",
+    "PUBLISH_COMPLETE",
+    "FAILED",
+  ]),
+  fail_reason: z.string().nullish(),
+  publicaly_available_post_id: z
+    .array(z.union([z.string(), z.number()]))
+    .nullish()
+    .transform((v) => v ?? []),
+});
 
 const tokenResponseSchema = z.object({
   open_id: z.string().min(1),
@@ -61,6 +100,7 @@ export function createLiveTikTokPostingClient(
   const fetchImpl = options.fetch ?? fetch;
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date());
+  const sleep = options.sleep ?? realSleep;
   const limiter = () => options.rateLimiter ?? getRateLimiter(TIKTOK_POSTING_PROVIDER);
   const config = () => readLoginConfig(env);
 
@@ -81,7 +121,7 @@ export function createLiveTikTokPostingClient(
     });
   }
 
-  return {
+  const client: TikTokPostingClient = {
     buildAuthUrl(oauth: OAuthStart): string {
       const { state, redirectUri } = oauthStartSchema.parse(oauth);
       const url = new URL(LOGIN_AUTHORIZE_URL);
@@ -153,22 +193,103 @@ export function createLiveTikTokPostingClient(
       });
     },
 
-    async publishVideoFromUrl(input): Promise<{ publishId: string }> {
-      const privacy = tiktokPrivacyLevelSchema.parse(input.privacyLevel);
-      // Never post publicly while unaudited, and never post at all from tests.
+    async publishVideoFromUrl(rawInput): Promise<{ publishId: string }> {
+      const input = publishInputSchema.parse(rawInput);
+      const privacy = input.privacyLevel;
+      // Never post publicly while unaudited, and never post at all from tests
+      // (a test may opt in only with an injected fetch stub).
       assertPrivacyAllowed(privacy, config().audited);
-      assertNotUnderTest(TIKTOK_POSTING_PROVIDER, "publishVideoFromUrl", env);
-      // TODO(M3): HEAD sourceUrl for the size → planChunks() → POST
-      // /post/publish/video/init/ (source FILE_UPLOAD, video_size, chunk_size,
-      // total_chunk_count, post_info.privacy_level) → stream each Range of
-      // sourceUrl and PUT it to upload_url with contentRange().
-      throw new NotImplementedIntegrationError(TIKTOK_POSTING_PROVIDER, "publishVideoFromUrl");
+      assertNotUnderTest(TIKTOK_POSTING_PROVIDER, "publishVideoFromUrl", env, {
+        injectedFetch: options.fetch,
+        allowStubbedSideEffectsUnderTest: options.allowStubbedSideEffectsUnderTest,
+      });
+      const tokenKey = keyForSecret(input.accessToken);
+
+      // 1. Creator info right before posting (Direct Post UX rules): the
+      //    creator must be able to post now and offer the privacy level.
+      const creator = await client.getCreatorInfo({ accessToken: input.accessToken });
+      if (!creator.privacyLevelOptions.includes(privacy)) {
+        throw new IntegrationError(
+          TIKTOK_POSTING_PROVIDER,
+          "permission_denied",
+          `This TikTok account does not offer ${privacy}${privacy === "SELF_ONLY" ? "" : " (unaudited apps need a private account)"}.`,
+          { retryable: false },
+        );
+      }
+
+      // 2. Size and type of the Shopify file, then the chunk plan.
+      const source = await probeSource(fetchImpl, input.sourceUrl);
+      const plan = planChunks(source.size);
+
+      // One publish per (profile, source) at a time: a double click or a
+      // concurrent retry must not post the same video twice.
+      const result = await limiter().withLock(
+        `tiktok:publish:${tokenKey}:${keyForSecret(input.sourceUrl)}`,
+        15 * 60_000,
+        async () => {
+          // 3. Init. Not retried on ambiguous errors: it is not idempotent.
+          await limiter().take("posting.init", `token:${tokenKey}`);
+          const init = await postingJson(
+            fetchImpl,
+            `${OPEN_API_BASE}/post/publish/video/init/`,
+            input.accessToken,
+            {
+              post_info: {
+                title: input.caption,
+                privacy_level: privacy,
+                disable_comment: creator.commentDisabled,
+                disable_duet: creator.duetDisabled,
+                disable_stitch: creator.stitchDisabled,
+              },
+              source_info: {
+                source: "FILE_UPLOAD",
+                video_size: plan.videoSize,
+                chunk_size: plan.chunkSize,
+                total_chunk_count: plan.totalChunkCount,
+              },
+            },
+            initDataSchema,
+          );
+          // 4. Stream the chunks from the source to TikTok.
+          await transferChunks({
+            fetchImpl,
+            sourceUrl: input.sourceUrl,
+            uploadUrl: init.upload_url,
+            plan,
+            contentType: source.contentType,
+            sleep,
+          });
+          return { publishId: init.publish_id };
+        },
+      );
+      if (!result) {
+        throw new IntegrationError(
+          TIKTOK_POSTING_PROVIDER,
+          "invalid_input",
+          "This video is already being published to this profile.",
+          { retryable: false },
+        );
+      }
+      return result;
     },
 
-    async getPublishStatus(): Promise<TikTokPublishStatus> {
-      // TODO(M3): POST /post/publish/status/fetch/ { publish_id } (rate bucket posting.status);
-      // map publicaly_available_post_id (sic) to postIds.
-      throw new NotImplementedIntegrationError(TIKTOK_POSTING_PROVIDER, "getPublishStatus");
+    async getPublishStatus({ accessToken, publishId }): Promise<TikTokPublishStatus> {
+      z.string().min(1).max(64).parse(publishId);
+      await limiter().take("posting.status", `token:${keyForSecret(accessToken)}`);
+      const data = await postingJson(
+        fetchImpl,
+        `${OPEN_API_BASE}/post/publish/status/fetch/`,
+        accessToken,
+        { publish_id: publishId },
+        statusDataSchema,
+      );
+      return tiktokPublishStatusSchema.parse({
+        status: data.status,
+        failReason: data.fail_reason || undefined,
+        // Only public posts that passed moderation get ids (sic: "publicaly").
+        postIds: data.publicaly_available_post_id.map(String),
+      });
     },
   };
+  return client;
 }

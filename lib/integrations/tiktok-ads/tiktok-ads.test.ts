@@ -5,14 +5,27 @@ import {
   hourlyStatSchema,
   IntegrationError,
   tiktokAdvertiserSchema,
+  type CampaignIds,
   type CampaignSpec,
 } from "@/lib/domain/contracts";
 
+import fx from "./__fixtures__/marketing-api-v1.3.json";
+import { ADS_PROD_BASE, ADS_SANDBOX_BASE } from "./config";
+import { quoteBigIds, requestIdFor, withRetry } from "./http";
 import { createTikTokAdsClient } from "./index";
-import { createLiveTikTokAdsClient } from "./live";
+import { createLiveTikTokAdsClient, type LiveTikTokAdsOptions } from "./live";
 import { createMockTikTokAdsClient, MOCK_ADS_AUTH_CODE } from "./mock";
-import { noopRateLimiter } from "./rate-limit";
-import { NotImplementedIntegrationError, UnsafeActionError } from "./safety";
+import { noopRateLimiter, type RateLimiter } from "./rate-limit";
+import { localDatesFor, localToUtc } from "./report";
+import { isTestEnvironment, UnsafeActionError } from "./safety";
+import {
+  adCreateBody,
+  adGroupCreateBody,
+  assertCreatesDisabled,
+  campaignCreateBody,
+  CreatedEnabledError,
+  validateSpecForTikTok,
+} from "./spec";
 
 const oauth = {
   state: "s".repeat(32),
@@ -25,7 +38,7 @@ const spec: CampaignSpec = {
   objective: "WEB_CONVERSIONS",
   budget: { mode: "daily", amount: 50, level: "ad_group" },
   pixelId: "PIXEL1",
-  optimizationEvent: "COMPLETE_PAYMENT",
+  optimizationEvent: "SHOPPING",
   landingPageUrl: "https://shop.example.com/products/x",
   adGroups: [
     {
@@ -35,7 +48,7 @@ const spec: CampaignSpec = {
       ads: [
         {
           name: "Ad 1",
-          videoId: "v1",
+          videoId: "v10033g50000ctestvideo0001",
           adText: "Great product",
           callToAction: "SHOP_NOW",
           identity: { type: "custom", displayName: "Brand" },
@@ -51,6 +64,93 @@ const spec: CampaignSpec = {
     },
   ],
 };
+
+/* -------------------------------------------------------------------------- */
+/* Recorded-fixture transport                                                 */
+/* -------------------------------------------------------------------------- */
+
+type Recorded = { method: string; path: string; query: Record<string, string>; body: unknown };
+type Reply = unknown | ((call: Recorded) => unknown);
+
+/**
+ * A fetch stub that serves fixture envelopes by "METHOD path". A list of
+ * replies is consumed in order (the last one repeats). Every call is recorded.
+ */
+function fixtureFetch(routes: Record<string, Reply | Reply[]>) {
+  const calls: Recorded[] = [];
+  const cursors = new Map<string, number>();
+  const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const path = url.pathname.replace(/^\/open_api\/v1\.3\//, "");
+    const call: Recorded = {
+      method: init?.method ?? "GET",
+      path,
+      query: Object.fromEntries(url.searchParams),
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    };
+    calls.push(call);
+    const key = `${call.method} ${path}`;
+    const route = routes[key];
+    if (route === undefined) throw new Error(`No fixture for ${key}`);
+    const list = Array.isArray(route) ? route : [route];
+    const i = cursors.get(key) ?? 0;
+    cursors.set(key, i + 1);
+    const reply = list[Math.min(i, list.length - 1)];
+    const body = typeof reply === "function" ? (reply as (c: Recorded) => unknown)(call) : reply;
+    if (body instanceof Response) return body;
+    // Raw text: lets a test send int64 ids as JSON numbers, as TikTok may.
+    if (typeof body === "string") return new Response(body);
+    return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+  });
+  return { fetch, calls, url: (c: Recorded) => c.path };
+}
+
+const env = { TIKTOK_APP_ID: "app123", TIKTOK_APP_SECRET: "secret", TIKTOK_SANDBOX: "true" };
+const fixedNow = () => new Date("2026-11-04T10:00:00.000Z");
+
+function live(fetch: typeof globalThis.fetch, extra: Partial<LiveTikTokAdsOptions> = {}) {
+  return createLiveTikTokAdsClient({
+    env,
+    fetch,
+    rateLimiter: noopRateLimiter,
+    now: fixedNow,
+    sleep: async () => {},
+    ...extra,
+  });
+}
+
+/** Routes for a fresh account: nothing exists yet. */
+const freshRoutes = () => ({
+  "GET identity/get/": fx.identity_get_empty,
+  "POST identity/create/": fx.identity_create,
+  "POST tt_video/authorize/": fx.tt_video_authorize,
+  "GET tt_video/info/": fx.tt_video_info,
+  "GET campaign/get/": [fx.campaign_get_empty, fx.campaign_get_created],
+  "POST campaign/create/": fx.campaign_create,
+  "POST adgroup/create/": fx.adgroup_create,
+  "GET file/video/ad/info/": fx.video_info,
+  "POST file/image/ad/upload/": fx.image_upload,
+  "POST ad/create/": [fx.ad_create_1, fx.ad_create_2],
+  "GET adgroup/get/": fx.adgroup_get_created,
+  "GET ad/get/": fx.ad_get_created,
+  "POST campaign/status/update/": fx.status_update,
+  "POST adgroup/status/update/": fx.status_update,
+  "POST ad/status/update/": fx.status_update,
+});
+
+/** Routes once the paused campaign exists. */
+const createdRoutes = () => ({ ...freshRoutes(), "GET campaign/get/": fx.campaign_get_created });
+
+const createdIds: CampaignIds = {
+  campaignId: "1812345678901234567",
+  adGroups: [
+    { adGroupId: "1812345678901234600", adIds: ["1812345678901234701", "1812345678901234702"] },
+  ],
+};
+
+/* -------------------------------------------------------------------------- */
+/* Mock                                                                       */
+/* -------------------------------------------------------------------------- */
 
 describe("tiktok ads mock: contract conformance", () => {
   it("defaults to the mock in mock mode", () => {
@@ -107,7 +207,34 @@ describe("tiktok ads mock: contract conformance", () => {
 
     await expect(
       client.launchCampaign(creds, { campaignId: "999", adGroups: [] }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      client.launchCampaign(creds, {
+        campaignId: "999",
+        adGroups: [{ adGroupId: "998", adIds: ["997"] }],
+      }),
     ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("re-creating the same spec returns the same ids and keeps their status (like live)", async () => {
+    const client = createMockTikTokAdsClient();
+    const ids = await client.createPausedCampaign(creds, spec);
+    await client.launchCampaign(creds, ids);
+    expect(await client.createPausedCampaign(creds, spec)).toEqual(ids);
+    expect(client.statusOf(ids.campaignId)).toBe("ENABLE");
+  });
+
+  it("rejects the same specs live would reject", async () => {
+    const client = createMockTikTokAdsClient();
+    await expect(
+      client.createPausedCampaign(creds, { ...spec, pixelId: undefined }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      client.createPausedCampaign(creds, {
+        ...spec,
+        adGroups: [{ ...spec.adGroups[0], countries: ["AQ"] }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
   it("returns one parseable stat per hour, deterministically", async () => {
@@ -122,16 +249,112 @@ describe("tiktok ads mock: contract conformance", () => {
     expect(stats[0].hour).toBe("2026-10-01T00:00:00.000Z");
     for (const s of stats) hourlyStatSchema.parse(s);
     expect(await createMockTikTokAdsClient().getHourlyStats(creds, input)).toEqual(stats);
+    await expect(
+      client.getHourlyStats(creds, { ...input, to: "2026-09-30T00:00:00.000Z" }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
   });
 });
 
-describe("tiktok ads live (stubbed fetch, no network)", () => {
-  const env = { TIKTOK_APP_ID: "app123", TIKTOK_APP_SECRET: "secret", TIKTOK_SANDBOX: "true" };
+/* -------------------------------------------------------------------------- */
+/* Never created enabled                                                      */
+/* -------------------------------------------------------------------------- */
+
+describe("never created enabled", () => {
+  const parsed = validateSpecForTikTok(spec);
+  const custom = {
+    type: "custom" as const,
+    identityId: "i",
+    videoId: "v",
+    coverImageId: "img",
+  };
+
+  it("every create payload is DISABLE, whatever the spec", () => {
+    for (const budget of [
+      { mode: "daily", amount: 10, level: "campaign" },
+      { mode: "total", amount: 100, level: "ad_group" },
+    ] as const) {
+      const s = validateSpecForTikTok({ ...spec, budget });
+      expect(campaignCreateBody("a", s).operation_status).toBe("DISABLE");
+      expect(adGroupCreateBody("a", "c", s, s.adGroups[0], fixedNow()).operation_status).toBe(
+        "DISABLE",
+      );
+      const ad = adCreateBody("a", "g", s, s.adGroups[0].ads[0], custom);
+      expect(ad.creatives.every((c) => c.operation_status === "DISABLE")).toBe(true);
+    }
+  });
+
+  it("the guard refuses anything not explicitly DISABLE (TikTok defaults to ENABLE)", () => {
+    expect(() => assertCreatesDisabled("campaign", { campaign_name: "x" })).toThrow(
+      CreatedEnabledError,
+    );
+    expect(() => assertCreatesDisabled("adgroup", { operation_status: "ENABLE" })).toThrow(
+      CreatedEnabledError,
+    );
+    expect(() => assertCreatesDisabled("ad", { creatives: [] })).toThrow(CreatedEnabledError);
+    expect(() =>
+      assertCreatesDisabled("ad", {
+        creatives: [{ operation_status: "DISABLE" }, { operation_status: "ENABLE" }],
+      }),
+    ).toThrow(CreatedEnabledError);
+    expect(() =>
+      assertCreatesDisabled(
+        "ad",
+        adCreateBody("a", "g", parsed, parsed.adGroups[0].ads[0], custom),
+      ),
+    ).not.toThrow();
+  });
+
+  it("live sends DISABLE on every create and never an ENABLE status update", async () => {
+    const { fetch, calls } = fixtureFetch(freshRoutes());
+    await live(fetch).createPausedCampaign(creds, spec);
+    const creates = calls.filter((c) => /^(campaign|adgroup|ad)\/create\/$/.test(c.path));
+    expect(creates.map((c) => c.path)).toEqual([
+      "campaign/create/",
+      "adgroup/create/",
+      "ad/create/",
+      "ad/create/",
+    ]);
+    for (const c of creates) {
+      const body = c.body as {
+        operation_status?: string;
+        creatives?: { operation_status: string }[];
+      };
+      const statuses = body.creatives?.map((x) => x.operation_status) ?? [body.operation_status];
+      expect(statuses).toEqual(statuses.map(() => "DISABLE"));
+    }
+    expect(calls.some((c) => c.path.endsWith("status/update/"))).toBe(false);
+  });
+
+  it("if TikTok reports anything enabled after creation, it is disabled again and the call fails", async () => {
+    const routes = freshRoutes();
+    const enabledAds = structuredClone(fx.ad_get_created);
+    enabledAds.data.list[1].operation_status = "ENABLE";
+    const { fetch, calls } = fixtureFetch({ ...routes, "GET ad/get/": enabledAds });
+    await expect(live(fetch).createPausedCampaign(creds, spec)).rejects.toBeInstanceOf(
+      CreatedEnabledError,
+    );
+    const updates = calls.filter((c) => c.path.endsWith("status/update/"));
+    expect(updates.map((c) => c.path)).toEqual([
+      "campaign/status/update/",
+      "adgroup/status/update/",
+      "ad/status/update/",
+    ]);
+    expect(
+      updates.every((c) => (c.body as { operation_status: string }).operation_status === "DISABLE"),
+    ).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Live, recorded fixtures, no network                                        */
+/* -------------------------------------------------------------------------- */
+
+describe("tiktok ads live: auth and advertisers", () => {
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
 
   it("builds the advertiser authorization url", () => {
-    const client = createLiveTikTokAdsClient({ env, fetch: vi.fn(), rateLimiter: noopRateLimiter });
+    const client = live(vi.fn());
     const url = new URL(client.buildAuthUrl(oauth));
     expect(url.origin + url.pathname).toBe("https://business-api.tiktok.com/portal/auth");
     expect(url.searchParams.get("app_id")).toBe("app123");
@@ -146,7 +369,7 @@ describe("tiktok ads live (stubbed fetch, no network)", () => {
         data: { access_token: "tok", advertiser_ids: ["1", 2], scope: [1, 4] },
       }),
     );
-    const client = createLiveTikTokAdsClient({ env, fetch, rateLimiter: noopRateLimiter });
+    const client = live(fetch);
     expect(await client.exchangeAuthCode({ code: "abc" })).toEqual({
       accessToken: "tok",
       advertiserIds: ["1", "2"],
@@ -163,8 +386,7 @@ describe("tiktok ads live (stubbed fetch, no network)", () => {
 
   it("maps token errors to auth_expired", async () => {
     const fetch = vi.fn(async () => json({ code: 40105, message: "Access token is incorrect" }));
-    const client = createLiveTikTokAdsClient({ env, fetch, rateLimiter: noopRateLimiter });
-    await expect(client.listAdvertisers({ accessToken: "x" })).rejects.toMatchObject({
+    await expect(live(fetch).listAdvertisers({ accessToken: "x" })).rejects.toMatchObject({
       code: "auth_expired",
     });
   });
@@ -175,25 +397,475 @@ describe("tiktok ads live (stubbed fetch, no network)", () => {
         ? json({ code: 0, data: { list: [{ advertiser_id: 42, advertiser_name: "Acme" }] } })
         : json({ code: 40001, message: "no permission" }),
     );
-    const client = createLiveTikTokAdsClient({ env, fetch, rateLimiter: noopRateLimiter });
-    expect(await client.listAdvertisers({ accessToken: "tok" })).toEqual([
+    expect(await live(fetch).listAdvertisers({ accessToken: "tok" })).toEqual([
       { advertiserId: "42", name: "Acme" },
     ]);
   });
 
-  it("M3 methods throw a typed not-implemented error", async () => {
-    const client = createLiveTikTokAdsClient({ env, fetch: vi.fn(), rateLimiter: noopRateLimiter });
-    await expect(client.createPausedCampaign(creds, spec)).rejects.toBeInstanceOf(
-      NotImplementedIntegrationError,
+  it("keeps int64 advertiser ids exact and prefers the IANA display time zone", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes("oauth2/advertiser/get")
+        ? new Response(
+            '{"code":0,"data":{"list":[{"advertiser_id":7000000000000000001,"advertiser_name":"EU"}]}}',
+          )
+        : new Response(
+            JSON.stringify(fx.advertiser_info_paris).replace(
+              '"7000000000000000001"',
+              "7000000000000000001",
+            ),
+          ),
     );
+    expect(await live(fetch).listAdvertisers({ accessToken: "tok" })).toEqual([
+      {
+        advertiserId: "7000000000000000001",
+        name: "EU",
+        currency: "EUR",
+        timezone: "Europe/Paris",
+      },
+    ]);
+  });
+});
+
+describe("tiktok ads live: sandbox and transport", () => {
+  it("resource calls go to the sandbox host unless TIKTOK_SANDBOX=false", async () => {
+    for (const [sandbox, base] of [
+      ["true", ADS_SANDBOX_BASE],
+      [undefined, ADS_SANDBOX_BASE],
+      ["false", ADS_PROD_BASE],
+    ] as const) {
+      const fetch = vi.fn(async () => new Response(JSON.stringify(fx.video_upload)));
+      await createLiveTikTokAdsClient({
+        env: { ...env, TIKTOK_SANDBOX: sandbox },
+        fetch,
+        rateLimiter: noopRateLimiter,
+      }).uploadVideoByUrl(creds, { videoUrl: "https://cdn.shopify.com/v.mp4", fileName: "v.mp4" });
+      expect(String((fetch.mock.calls[0] as unknown[])[0])).toBe(`${base}/file/video/ad/upload/`);
+    }
+  });
+
+  it("quotes int64 ids before JSON.parse", () => {
+    const text =
+      '{"campaign_id":1812345678901234567,"ad_ids":[1812345678901234701, 1812345678901234702],"spend":12345678901234567}';
+    expect(JSON.parse(quoteBigIds(text))).toEqual({
+      campaign_id: "1812345678901234567",
+      ad_ids: ["1812345678901234701", "1812345678901234702"],
+      spend: 12345678901234567,
+    });
+  });
+
+  it("request ids are deterministic int64 strings", () => {
+    const a = requestIdFor("campaign", "1", "x");
+    expect(a).toBe(requestIdFor("campaign", "1", "x"));
+    expect(a).not.toBe(requestIdFor("campaign", "1", "y"));
+    expect(/^\d+$/.test(a) && BigInt(a) < BigInt(2) ** BigInt(63)).toBe(true);
+  });
+
+  it("retries rate limits always, ambiguous errors only when idempotent", async () => {
+    const sleep = vi.fn(async () => {});
+    const rate = new IntegrationError("t", "rate_limited", "r");
+    const upstream = new IntegrationError("t", "provider_error", "p");
+    const bad = new IntegrationError("t", "invalid_input", "i");
+
+    let n = 0;
+    await expect(
+      withRetry({ attempts: 3, idempotent: false, sleep }, async () => {
+        if (n++ === 0) throw rate;
+        return "ok";
+      }),
+    ).resolves.toBe("ok");
+
+    const once = vi.fn(async () => {
+      throw upstream;
+    });
+    await expect(withRetry({ attempts: 3, idempotent: false, sleep }, once)).rejects.toBe(upstream);
+    expect(once).toHaveBeenCalledTimes(1);
+
+    const thrice = vi.fn(async () => {
+      throw upstream;
+    });
+    await expect(withRetry({ attempts: 3, idempotent: true, sleep }, thrice)).rejects.toBe(
+      upstream,
+    );
+    expect(thrice).toHaveBeenCalledTimes(3);
+
+    const never = vi.fn(async () => {
+      throw bad;
+    });
+    await expect(withRetry({ attempts: 3, idempotent: true, sleep }, never)).rejects.toBe(bad);
+    expect(never).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes an ads.api token per advertiser on every call", async () => {
+    const take = vi.fn(async () => {});
+    const limiter: RateLimiter = { take, withLock: async (_k, _t, fn) => fn() };
+    const { fetch } = fixtureFetch({ "POST file/video/ad/upload/": fx.video_upload });
+    await live(fetch, { rateLimiter: limiter }).uploadVideoByUrl(creds, {
+      videoUrl: "https://cdn.shopify.com/v.mp4",
+      fileName: "v.mp4",
+    });
+    expect(take).toHaveBeenCalledWith("ads.api", `adv:${creds.advertiserId}`);
+  });
+});
+
+describe("tiktok ads live: uploadVideoByUrl", () => {
+  const input = {
+    videoUrl: "https://cdn.shopify.com/s/files/v.mp4",
+    fileName: "trendcart-video-1.mp4",
+  };
+
+  it("posts UPLOAD_BY_URL and returns the video id", async () => {
+    const { fetch, calls } = fixtureFetch({ "POST file/video/ad/upload/": fx.video_upload });
+    expect(await live(fetch).uploadVideoByUrl(creds, input)).toEqual({
+      videoId: "v10033g50000ctestvideo0001",
+    });
+    expect(calls[0]!.body).toEqual({
+      advertiser_id: creds.advertiserId,
+      upload_type: "UPLOAD_BY_URL",
+      video_url: input.videoUrl,
+      file_name: input.fileName,
+    });
+  });
+
+  it("retries a rate limit but never an ambiguous failure (would duplicate the upload)", async () => {
+    const ok = fixtureFetch({ "POST file/video/ad/upload/": [fx.rate_limited, fx.video_upload] });
+    await expect(live(ok.fetch).uploadVideoByUrl(creds, input)).resolves.toBeTruthy();
+    expect(ok.calls).toHaveLength(2);
+
+    const ko = fixtureFetch({ "POST file/video/ad/upload/": [fx.system_error, fx.video_upload] });
+    await expect(live(ko.fetch).uploadVideoByUrl(creds, input)).rejects.toMatchObject({
+      code: "provider_error",
+    });
+    expect(ko.calls).toHaveLength(1);
+  });
+});
+
+describe("tiktok ads live: createPausedCampaign", () => {
+  it("creates identity, campaign, ad group and ads, and returns every id", async () => {
+    const { fetch, calls } = fixtureFetch(freshRoutes());
+    const ids = await live(fetch).createPausedCampaign(creds, spec);
+    expect(ids).toEqual(createdIds);
+
+    const body = (path: string, i = 0) =>
+      calls.filter((c) => c.path === path)[i]!.body as Record<string, unknown>;
+    expect(body("identity/create/")).toEqual({
+      advertiser_id: creds.advertiserId,
+      display_name: "Brand",
+    });
+    expect(body("tt_video/authorize/")).toEqual({
+      advertiser_id: creds.advertiserId,
+      auth_code: "spark-code",
+    });
+    expect(body("campaign/create/")).toMatchObject({
+      campaign_name: "Test campaign",
+      objective_type: "WEB_CONVERSIONS",
+      budget_mode: "BUDGET_MODE_INFINITE",
+      budget_optimize_on: false,
+      request_id: requestIdFor("campaign", creds.advertiserId, "Test campaign"),
+    });
+    expect(body("adgroup/create/")).toMatchObject({
+      campaign_id: createdIds.campaignId,
+      adgroup_name: "FR broad",
+      location_ids: ["3017382"],
+      placements: ["PLACEMENT_TIKTOK"],
+      budget_mode: "BUDGET_MODE_DAY",
+      budget: 50,
+      schedule_type: "SCHEDULE_FROM_NOW",
+      schedule_start_time: "2026-11-04 10:00:00",
+      optimization_goal: "CONVERT",
+      billing_event: "OCPM",
+      pixel_id: "PIXEL1",
+      optimization_event: "SHOPPING",
+      bid_type: "BID_TYPE_NO_BID",
+      gender: "GENDER_UNLIMITED",
+    });
+    expect((body("ad/create/", 0).creatives as unknown[])[0]).toMatchObject({
+      ad_name: "Ad 1",
+      identity_type: "CUSTOMIZED_USER",
+      identity_id: "7300000000000000888",
+      video_id: "v10033g50000ctestvideo0001",
+      image_ids: ["ad-site-i18n-sg/20261104cover0001"],
+      landing_page_url: spec.landingPageUrl,
+      call_to_action: "SHOP_NOW",
+    });
+    // Spark: the creator's post (int64 id kept exact), no uploaded video.
+    const spark = (body("ad/create/", 1).creatives as Record<string, unknown>[])[0]!;
+    expect(spark).toMatchObject({
+      identity_type: "AUTH_CODE",
+      identity_id: "creator-identity-1",
+      tiktok_item_id: "7431234567890123456",
+    });
+    expect(spark).not.toHaveProperty("video_id");
+  });
+
+  it("is idempotent: a re-run finds everything by name and creates nothing", async () => {
+    const { fetch, calls } = fixtureFetch({
+      ...freshRoutes(),
+      "GET identity/get/": fx.identity_get_brand,
+      "GET campaign/get/": fx.campaign_get_created,
+    });
+    expect(await live(fetch).createPausedCampaign(creds, spec)).toEqual(createdIds);
+    expect(calls.filter((c) => c.path.endsWith("/create/"))).toEqual([]);
+  });
+
+  it("resumes a half-created campaign: only the missing ad is created", async () => {
+    const oneAd = structuredClone(fx.ad_get_created);
+    oneAd.data.list = [oneAd.data.list[0]!];
+    const { fetch, calls } = fixtureFetch({
+      ...freshRoutes(),
+      "GET campaign/get/": fx.campaign_get_created,
+      "GET ad/get/": [oneAd, fx.ad_get_created],
+      "POST ad/create/": fx.ad_create_2,
+    });
+    expect(await live(fetch).createPausedCampaign(creds, spec)).toEqual(createdIds);
+    expect(
+      calls
+        .filter((c) => c.path.endsWith("/create/") && c.path !== "identity/create/")
+        .map((c) => c.path),
+    ).toEqual(["ad/create/"]);
+  });
+
+  it("refuses to reuse a same-name campaign that is already enabled", async () => {
+    const enabled = structuredClone(fx.campaign_get_created);
+    enabled.data.list[0]!.operation_status = "ENABLE";
+    const { fetch, calls } = fixtureFetch({ ...freshRoutes(), "GET campaign/get/": enabled });
+    await expect(live(fetch).createPausedCampaign(creds, spec)).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    expect(calls.some((c) => c.path === "campaign/create/")).toBe(false);
+  });
+
+  it("an already-authorized Spark code still resolves through tt_video/info", async () => {
+    const { fetch } = fixtureFetch({
+      ...freshRoutes(),
+      "POST tt_video/authorize/": fx.tt_video_authorize_already,
+    });
+    await expect(live(fetch).createPausedCampaign(creds, spec)).resolves.toEqual(createdIds);
+  });
+
+  it("keeps int64 ids sent as JSON numbers exact (campaign id, Spark item id)", async () => {
+    const asNumbers = (o: unknown) =>
+      JSON.stringify(o).replace(/"(campaign_id|item_id)":"(\d{16,})"/g, '"$1":$2');
+    const { fetch, calls } = fixtureFetch({
+      ...freshRoutes(),
+      "GET tt_video/info/": asNumbers(fx.tt_video_info),
+      "POST campaign/create/": asNumbers(fx.campaign_create),
+      "GET campaign/get/": [fx.campaign_get_empty, asNumbers(fx.campaign_get_created)],
+    });
+    expect(await live(fetch).createPausedCampaign(creds, spec)).toEqual(createdIds);
+    const ads = calls.filter((c) => c.path === "ad/create/");
+    expect(
+      (ads[1]!.body as { creatives: { tiktok_item_id: string }[] }).creatives[0]!.tiktok_item_id,
+    ).toBe("7431234567890123456");
+    await expect(live(fetch).createPausedCampaign(creds, spec)).resolves.toEqual(createdIds);
+  });
+
+  it("a video still processing fails retryably", async () => {
+    const { fetch } = fixtureFetch({
+      ...freshRoutes(),
+      "GET file/video/ad/info/": fx.video_info_processing,
+    });
+    await expect(live(fetch).createPausedCampaign(creds, spec)).rejects.toMatchObject({
+      code: "provider_error",
+      retryable: true,
+    });
+  });
+
+  it("validates the spec before any request", async () => {
+    const { fetch } = fixtureFetch({});
+    const client = live(fetch);
+    const bad: CampaignSpec[] = [
+      { ...spec, optimizationEvent: undefined },
+      { ...spec, landingPageUrl: "http://shop.example.com/x" },
+      { ...spec, adGroups: [{ ...spec.adGroups[0], bidStrategy: "cost_cap" }] },
+      { ...spec, adGroups: [{ ...spec.adGroups[0], ageGroups: ["18-24"] }] },
+      { ...spec, adGroups: [spec.adGroups[0], spec.adGroups[0]] },
+    ];
+    for (const s of bad) {
+      await expect(client.createPausedCampaign(creds, s)).rejects.toMatchObject({
+        code: "invalid_input",
+      });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("maps campaign budget (CBO), total budget and cost cap", () => {
+    const s = validateSpecForTikTok({
+      ...spec,
+      objective: "TRAFFIC",
+      pixelId: undefined,
+      optimizationEvent: undefined,
+      budget: { mode: "total", amount: 300, level: "campaign" },
+      adGroups: [
+        { ...spec.adGroups[0], bidStrategy: "cost_cap", bidAmount: 0.4, gender: "female" },
+      ],
+    });
+    expect(campaignCreateBody("a", s)).toMatchObject({
+      budget_optimize_on: true,
+      budget_mode: "BUDGET_MODE_TOTAL",
+      budget: 300,
+    });
+    const g = adGroupCreateBody("a", "c", s, s.adGroups[0], fixedNow());
+    expect(g).toMatchObject({
+      optimization_goal: "CLICK",
+      billing_event: "CPC",
+      bid_type: "BID_TYPE_CUSTOM",
+      bid_price: 0.4,
+      gender: "GENDER_FEMALE",
+      schedule_type: "SCHEDULE_START_END",
+      schedule_end_time: "2026-11-11 10:00:00",
+    });
+    expect(g).not.toHaveProperty("budget");
+    expect(g).not.toHaveProperty("pixel_id");
+  });
+});
+
+describe("tiktok ads live: launch and pause", () => {
+  it("launch is blocked under test without the stub opt-in, before any request", async () => {
+    const { fetch } = fixtureFetch(createdRoutes());
+    await expect(live(fetch).launchCampaign(creds, createdIds)).rejects.toBeInstanceOf(
+      UnsafeActionError,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("the opt-in is ignored with the global fetch", async () => {
+    const client = createLiveTikTokAdsClient({
+      env,
+      rateLimiter: noopRateLimiter,
+      allowStubbedSideEffectsUnderTest: true,
+    });
+    await expect(client.launchCampaign(creds, createdIds)).rejects.toBeInstanceOf(
+      UnsafeActionError,
+    );
+  });
+
+  it("a test env cannot be hidden by passing a fixture env", () => {
+    expect(isTestEnvironment({})).toBe(true);
+  });
+
+  it("enables ads, then ad groups, then the campaign (stubbed transport)", async () => {
+    const { fetch, calls } = fixtureFetch(createdRoutes());
+    await live(fetch, { allowStubbedSideEffectsUnderTest: true }).launchCampaign(creds, createdIds);
+    const updates = calls.filter((c) => c.path.endsWith("status/update/"));
+    expect(
+      updates.map((c) => [c.path, (c.body as { operation_status: string }).operation_status]),
+    ).toEqual([
+      ["ad/status/update/", "ENABLE"],
+      ["adgroup/status/update/", "ENABLE"],
+      ["campaign/status/update/", "ENABLE"],
+    ]);
+    expect(updates[0]!.body).toMatchObject({ ad_ids: createdIds.adGroups[0]!.adIds });
+  });
+
+  it("launch refuses ids that are not part of the campaign", async () => {
+    const { fetch, calls } = fixtureFetch(createdRoutes());
+    const foreign = { ...createdIds, adGroups: [{ adGroupId: "1", adIds: ["2"] }] };
+    await expect(
+      live(fetch, { allowStubbedSideEffectsUnderTest: true }).launchCampaign(creds, foreign),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(calls.some((c) => c.path.endsWith("status/update/"))).toBe(false);
+  });
+
+  it("pause disables the campaign first, then ad groups and ads", async () => {
+    const { fetch, calls } = fixtureFetch(createdRoutes());
+    await live(fetch).pauseCampaign(creds, createdIds);
+    expect(
+      calls.map((c) => [c.path, (c.body as { operation_status: string }).operation_status]),
+    ).toEqual([
+      ["campaign/status/update/", "DISABLE"],
+      ["adgroup/status/update/", "DISABLE"],
+      ["ad/status/update/", "DISABLE"],
+    ]);
+  });
+});
+
+describe("tiktok ads live: getHourlyStats", () => {
+  const input = {
+    campaignId: "1812345678901234567",
+    from: "2026-10-01T00:00:00.000Z",
+    to: "2026-10-01T03:00:00.000Z",
+  };
+
+  it("queries the advertiser-local day, paginates, converts to UTC and fills empty hours", async () => {
+    const { fetch, calls } = fixtureFetch({
+      "GET advertiser/info/": fx.advertiser_info_paris,
+      "GET report/integrated/get/": [fx.report_page_1, fx.report_page_2],
+    });
+    const stats = await live(fetch).getHourlyStats(creds, input);
+    for (const s of stats) hourlyStatSchema.parse(s);
+    // Paris is UTC+2 in October: local 02:00 → 00:00Z, local 04:00 → 02:00Z.
+    expect(stats).toEqual([
+      {
+        hour: "2026-10-01T00:00:00.000Z",
+        spend: 1.5,
+        impressions: 300,
+        clicks: 6,
+        conversions: 1,
+        revenue: 29.9,
+      },
+      {
+        hour: "2026-10-01T01:00:00.000Z",
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        revenue: 0,
+      },
+      // No purchase value: falls back to spend × ROAS.
+      {
+        hour: "2026-10-01T02:00:00.000Z",
+        spend: 2,
+        impressions: 500,
+        clicks: 10,
+        conversions: 2,
+        revenue: 20,
+      },
+    ]);
+    const reports = calls.filter((c) => c.path === "report/integrated/get/");
+    expect(reports.map((c) => c.query.page)).toEqual(["1", "2"]);
+    expect(reports[0]!.query).toMatchObject({
+      advertiser_id: creds.advertiserId,
+      report_type: "BASIC",
+      data_level: "AUCTION_CAMPAIGN",
+      start_date: "2026-10-01",
+      end_date: "2026-10-01",
+    });
+    expect(JSON.parse(reports[0]!.query.dimensions!)).toEqual(["campaign_id", "stat_time_hour"]);
+    expect(JSON.parse(reports[0]!.query.filtering!)).toEqual([
+      { field_name: "campaign_ids", filter_type: "IN", filter_value: '["1812345678901234567"]' },
+    ]);
+  });
+
+  it("splits a window crossing local midnight into one query per local day", () => {
+    expect(
+      localDatesFor(
+        "Europe/Paris",
+        Date.parse("2026-09-30T21:00:00Z"),
+        Date.parse("2026-09-30T23:00:00Z"),
+      ),
+    ).toEqual(["2026-09-30", "2026-10-01"]);
+    expect(new Date(localToUtc("Europe/Paris", "2026-10-25 01:00:00")).toISOString()).toBe(
+      "2026-10-24T23:00:00.000Z",
+    );
+    expect(new Date(localToUtc("America/New_York", "2026-03-08 12:00:00")).toISOString()).toBe(
+      "2026-03-08T16:00:00.000Z",
+    );
+  });
+
+  it("rejects an inverted window like the mock", async () => {
+    const { fetch } = fixtureFetch({});
+    await expect(
+      live(fetch).getHourlyStats(creds, { ...input, to: "2026-09-30T00:00:00.000Z" }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
 describe("safety: tests can never launch a real campaign", () => {
-  it("live launchCampaign is blocked under test before any request", async () => {
+  it("live launchCampaign is blocked under test before any request, even with a production env", async () => {
     const fetch = vi.fn();
     const client = createLiveTikTokAdsClient({
-      env: { ...process.env, TIKTOK_APP_ID: "a", TIKTOK_APP_SECRET: "b", TIKTOK_SANDBOX: "false" },
+      env: { TIKTOK_APP_ID: "a", TIKTOK_APP_SECRET: "b", TIKTOK_SANDBOX: "false" },
       fetch,
       rateLimiter: noopRateLimiter,
     });

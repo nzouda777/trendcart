@@ -7,11 +7,13 @@ import {
   type TikTokPrivacyLevel,
 } from "@/lib/domain/contracts";
 
-import { noopRateLimiter } from "../tiktok-ads/rate-limit";
+import { noopRateLimiter, type RateLimiter } from "../tiktok-ads/rate-limit";
 import { UnsafeActionError } from "../tiktok-ads/safety";
 
+import fx from "./__fixtures__/content-posting-v2.json";
 import { contentRange, MB, planChunks } from "./chunks";
 import { isPostingAudited } from "./config";
+import { mapPostingError } from "./http";
 import { createLiveTikTokPostingClient } from "./live";
 import { createMockTikTokPostingClient, MOCK_LOGIN_AUTH_CODE } from "./mock";
 
@@ -231,5 +233,306 @@ describe("chunk plan (Media Transfer Guide)", () => {
   it("rejects bad sizes", () => {
     expect(() => planChunks(0)).toThrow();
     expect(() => planChunks(10 * MB, 1 * MB)).toThrow();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Live publish and status: recorded fixtures, stubbed transport              */
+/* -------------------------------------------------------------------------- */
+
+const SOURCE = "https://cdn.shopify.com/s/files/1/0001/videos/clip.mp4";
+const UPLOAD = fx.video_init.data.upload_url;
+const API = "https://open.tiktokapis.com/v2";
+
+type Call = {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  bodySize?: number;
+  body?: unknown;
+};
+
+/**
+ * One stub for TikTok and the Shopify CDN. The source honours Range like
+ * Shopify's CDN; TikTok's upload_url answers 206 then 201.
+ */
+function postingStub(opts: {
+  size?: number;
+  creator?: unknown;
+  status?: unknown;
+  head?: "ok" | "405";
+  ranges?: boolean;
+  put?: (chunkIndex: number, attempt: number) => number;
+}) {
+  const size = opts.size ?? 21 * MB + 7;
+  const video = new Uint8Array(size);
+  for (let i = 0; i < size; i += 4096) video[i] = i % 251;
+  const calls: Call[] = [];
+  const putAttempts = new Map<string, number>();
+  const plan = planChunks(size);
+  const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
+
+  const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const headers = Object.fromEntries(new Headers(init?.headers).entries());
+    const method = init?.method ?? "GET";
+    const call: Call = { method, url, headers };
+    calls.push(call);
+    if (url === SOURCE) {
+      if (method === "HEAD") {
+        return opts.head === "405"
+          ? new Response(null, { status: 405 })
+          : new Response(null, {
+              headers: { "content-length": String(size), "content-type": "video/mp4" },
+            });
+      }
+      const range = /^bytes=(\d+)-(\d+)$/.exec(headers.range ?? "");
+      if (range && opts.ranges !== false) {
+        const [a, b] = [Number(range[1]), Number(range[2])];
+        return new Response(video.slice(a, b + 1), {
+          status: 206,
+          headers: { "content-range": `bytes ${a}-${b}/${size}`, "content-type": "video/mp4" },
+        });
+      }
+      return new Response(video, { headers: { "content-type": "video/mp4" } });
+    }
+    if (url === UPLOAD) {
+      const range = headers["content-range"]!;
+      const index = plan.chunks.findIndex((c) => range === contentRange(c, size));
+      const attempt = (putAttempts.get(range) ?? 0) + 1;
+      putAttempts.set(range, attempt);
+      call.bodySize = (init?.body as ArrayBuffer).byteLength;
+      const status = opts.put?.(index, attempt) ?? (index === plan.totalChunkCount - 1 ? 201 : 206);
+      return new Response(null, { status });
+    }
+    call.body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    if (url === `${API}/post/publish/creator_info/query/`) {
+      return json(opts.creator ?? fx.creator_info_private);
+    }
+    if (url === `${API}/post/publish/video/init/`) return json(fx.video_init);
+    if (url === `${API}/post/publish/status/fetch/`) {
+      const st = opts.status ?? fx.status_processing;
+      if (typeof st === "string") return new Response(st);
+      return json(st, (st as { error?: { code: string } }).error?.code === "ok" ? 200 : 400);
+    }
+    throw new Error(`unexpected ${method} ${url}`);
+  });
+  return { fetch, calls, plan, size };
+}
+
+function postingLive(
+  fetch: typeof globalThis.fetch,
+  extra: { rateLimiter?: RateLimiter; optIn?: boolean } = {},
+) {
+  return createLiveTikTokPostingClient({
+    env: { TIKTOK_LOGIN_CLIENT_KEY: "ck", TIKTOK_LOGIN_CLIENT_SECRET: "cs" },
+    fetch,
+    rateLimiter: extra.rateLimiter ?? noopRateLimiter,
+    sleep: async () => {},
+    allowStubbedSideEffectsUnderTest: extra.optIn ?? true,
+  });
+}
+
+const publishInput = {
+  accessToken: "act",
+  sourceUrl: SOURCE,
+  caption: "From trend to cart",
+  privacyLevel: "SELF_ONLY" as const,
+};
+
+describe("tiktok posting live: publishVideoFromUrl (stubbed transport)", () => {
+  it("queries creator info, inits FILE_UPLOAD and streams every chunk by Range", async () => {
+    const { fetch, calls, plan, size } = postingStub({});
+    expect(await postingLive(fetch).publishVideoFromUrl(publishInput)).toEqual({
+      publishId: fx.video_init.data.publish_id,
+    });
+    const order = calls.map(
+      (c) =>
+        `${c.method} ${c.url.replace(API, "").replace(SOURCE, "source").replace(UPLOAD, "upload")}`,
+    );
+    expect(order).toEqual([
+      "POST /post/publish/creator_info/query/",
+      "HEAD source",
+      "POST /post/publish/video/init/",
+      "GET source",
+      "PUT upload",
+      "GET source",
+      "PUT upload",
+    ]);
+    const init = calls.find((c) => c.url.endsWith("/video/init/"))!;
+    expect(init.headers.authorization).toBe("Bearer act");
+    expect(init.body).toEqual({
+      post_info: {
+        title: "From trend to cart",
+        privacy_level: "SELF_ONLY",
+        disable_comment: false,
+        disable_duet: true,
+        disable_stitch: true,
+      },
+      source_info: {
+        source: "FILE_UPLOAD",
+        video_size: size,
+        chunk_size: 10 * MB,
+        total_chunk_count: 2,
+      },
+    });
+    const gets = calls.filter((c) => c.url === SOURCE && c.method === "GET");
+    expect(gets.map((c) => c.headers.range)).toEqual([
+      `bytes=0-${10 * MB - 1}`,
+      `bytes=${10 * MB}-${size - 1}`,
+    ]);
+    const puts = calls.filter((c) => c.method === "PUT");
+    expect(
+      puts.map((c) => [c.headers["content-range"], c.headers["content-length"], c.bodySize]),
+    ).toEqual(plan.chunks.map((ch) => [contentRange(ch, size), String(ch.size), ch.size]));
+    expect(puts.every((c) => c.headers["content-type"] === "video/mp4")).toBe(true);
+  });
+
+  it("a small video goes up as one whole chunk", async () => {
+    const { fetch, calls } = postingStub({ size: 3 * MB });
+    await postingLive(fetch).publishVideoFromUrl(publishInput);
+    const puts = calls.filter((c) => c.method === "PUT");
+    expect(puts.map((c) => c.headers["content-range"])).toEqual([
+      `bytes 0-${3 * MB - 1}/${3 * MB}`,
+    ]);
+  });
+
+  it("falls back to a one-byte Range probe when HEAD is not supported", async () => {
+    const { fetch, calls } = postingStub({ head: "405", size: 3 * MB });
+    await postingLive(fetch).publishVideoFromUrl(publishInput);
+    expect(calls.find((c) => c.url === SOURCE && c.headers.range === "bytes=0-0")).toBeTruthy();
+  });
+
+  it("retries a chunk on 5xx and stops on an expired upload URL", async () => {
+    const retry = postingStub({
+      put: (i, attempt) => (attempt === 1 ? 502 : i === 1 ? 201 : 206),
+    });
+    await postingLive(retry.fetch).publishVideoFromUrl(publishInput);
+    expect(retry.calls.filter((c) => c.method === "PUT")).toHaveLength(4);
+
+    const expired = postingStub({ put: () => 403 });
+    await expect(
+      postingLive(expired.fetch).publishVideoFromUrl(publishInput),
+    ).rejects.toMatchObject({ code: "provider_error", retryable: false });
+  });
+
+  it("refuses a source that ignores Range on a multi-chunk upload", async () => {
+    const { fetch } = postingStub({ ranges: false });
+    await expect(postingLive(fetch).publishVideoFromUrl(publishInput)).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+  });
+
+  it("stops before init when the creator does not offer the privacy level", async () => {
+    const { fetch, calls } = postingStub({ creator: fx.creator_info_no_private });
+    await expect(postingLive(fetch).publishVideoFromUrl(publishInput)).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+    expect(calls.some((c) => c.url.endsWith("/video/init/"))).toBe(false);
+  });
+
+  it("stops when the creator cannot post right now (daily cap)", async () => {
+    const { fetch, calls } = postingStub({ creator: fx.creator_info_spam });
+    await expect(postingLive(fetch).publishVideoFromUrl(publishInput)).rejects.toMatchObject({
+      code: "quota_exceeded",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never publishes publicly under test, even with the stub opt-in", async () => {
+    const { fetch } = postingStub({});
+    for (const privacyLevel of [
+      "PUBLIC_TO_EVERYONE",
+      "FOLLOWER_OF_CREATOR",
+      "MUTUAL_FOLLOW_FRIENDS",
+    ] as const) {
+      await expect(
+        postingLive(fetch).publishVideoFromUrl({ ...publishInput, privacyLevel }),
+      ).rejects.toMatchObject({ code: "permission_denied" });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("is blocked without the opt-in, and the opt-in is ignored with the global fetch", async () => {
+    const { fetch } = postingStub({});
+    await expect(
+      postingLive(fetch, { optIn: false }).publishVideoFromUrl(publishInput),
+    ).rejects.toBeInstanceOf(UnsafeActionError);
+    const globalFetchClient = createLiveTikTokPostingClient({
+      env: { TIKTOK_LOGIN_CLIENT_KEY: "ck", TIKTOK_LOGIN_CLIENT_SECRET: "cs" },
+      rateLimiter: noopRateLimiter,
+      allowStubbedSideEffectsUnderTest: true,
+    });
+    await expect(globalFetchClient.publishVideoFromUrl(publishInput)).rejects.toBeInstanceOf(
+      UnsafeActionError,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a concurrent publish of the same video to the same profile", async () => {
+    const { fetch, calls } = postingStub({});
+    const busy: RateLimiter = { take: async () => {}, withLock: async () => null };
+    await expect(
+      postingLive(fetch, { rateLimiter: busy }).publishVideoFromUrl(publishInput),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(calls.some((c) => c.url.endsWith("/video/init/"))).toBe(false);
+  });
+
+  it("takes the creator_info and init rate buckets per token", async () => {
+    const take = vi.fn(async () => {});
+    const { fetch } = postingStub({ size: 3 * MB });
+    await postingLive(fetch, {
+      rateLimiter: { take, withLock: async (_k, _t, fn) => fn() },
+    }).publishVideoFromUrl(publishInput);
+    expect(take.mock.calls.map((c) => (c as unknown[])[0])).toEqual([
+      "posting.creator_info",
+      "posting.init",
+    ]);
+  });
+});
+
+describe("tiktok posting live: getPublishStatus", () => {
+  it("maps the status and fail reason", async () => {
+    const processing = postingStub({});
+    expect(
+      await postingLive(processing.fetch).getPublishStatus({ accessToken: "a", publishId: "p" }),
+    ).toEqual({ status: "PROCESSING_UPLOAD", postIds: [] });
+    expect(processing.calls[0]!.body).toEqual({ publish_id: "p" });
+
+    const failed = postingStub({ status: fx.status_failed });
+    expect(
+      await postingLive(failed.fetch).getPublishStatus({ accessToken: "a", publishId: "p" }),
+    ).toEqual({ status: "FAILED", failReason: "duration_check_failed", postIds: [] });
+  });
+
+  it("keeps int64 public post ids exact", async () => {
+    const raw =
+      '{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7431234567890123456]},"error":{"code":"ok","message":"","log_id":"l"}}';
+    const { fetch } = postingStub({ status: raw });
+    const st = tiktokPublishStatusSchema.parse(
+      await postingLive(fetch).getPublishStatus({ accessToken: "a", publishId: "p" }),
+    );
+    expect(st.postIds).toEqual(["7431234567890123456"]);
+  });
+
+  it("maps an unknown publish id to not_found", async () => {
+    const { fetch } = postingStub({ status: fx.status_invalid });
+    await expect(
+      postingLive(fetch).getPublishStatus({ accessToken: "a", publishId: "p" }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(mapPostingError("privacy_level_option_mismatch", 403)).toBe("permission_denied");
+  });
+});
+
+describe("tiktok posting mock: mirrors live checks", () => {
+  it("only accepts a privacy level the creator offers", async () => {
+    const audited = createMockTikTokPostingClient({ audited: true });
+    const base = { ...publishInput, accessToken: "mock-access-x" };
+    await expect(
+      audited.publishVideoFromUrl({ ...base, privacyLevel: "FOLLOWER_OF_CREATOR" }),
+    ).rejects.toMatchObject({ code: "permission_denied" });
+    await expect(
+      audited.publishVideoFromUrl({ ...base, privacyLevel: "PUBLIC_TO_EVERYONE" }),
+    ).resolves.toHaveProperty("publishId");
   });
 });

@@ -8,6 +8,7 @@ import {
   tiktokPrivacyLevelSchema,
   tiktokProfileTokenSchema,
   type TikTokCreatorInfo,
+  type TikTokPrivacyLevel,
   type TikTokPostingClient,
   type TikTokPublishStatus,
 } from "@/lib/domain/contracts";
@@ -19,7 +20,8 @@ import { assertPrivacyAllowed, LOGIN_SCOPES, TIKTOK_POSTING_PROVIDER } from "./c
  * Deterministic in-memory Login Kit + Content Posting. Never touches the
  * network. buildAuthUrl points back at our callback with a fake code so the
  * connect flow completes locally. Enforces the same unaudited-app rule as
- * live: only SELF_ONLY unless created with { audited: true }.
+ * live: only SELF_ONLY unless created with { audited: true }, and only a
+ * privacy level the creator offers (as live checks creator_info first).
  *
  * Magic inputs for tests:
  * - auth codes starting with "bad-" fail like an expired code;
@@ -66,6 +68,12 @@ export function createMockTikTokPostingClient(
     });
   }
 
+  // Unaudited: a private account, as TikTok requires. Audited: a public one.
+  const privacyOptions = (): TikTokPrivacyLevel[] =>
+    audited
+      ? ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"]
+      : ["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"];
+
   function assertToken(accessToken: string) {
     if (!accessToken || accessToken.startsWith("expired-")) {
       throw new IntegrationError(TIKTOK_POSTING_PROVIDER, "auth_expired", "access_token_invalid");
@@ -105,8 +113,7 @@ export function createMockTikTokPostingClient(
       return {
         displayName: "Mock Creator",
         avatarUrl: "https://example.com/mock-avatar.png",
-        // A private account, as required for unaudited posting.
-        privacyLevelOptions: ["FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"],
+        privacyLevelOptions: privacyOptions(),
         maxVideoPostDurationSec: 600,
         commentDisabled: false,
         duetDisabled: true,
@@ -121,6 +128,15 @@ export function createMockTikTokPostingClient(
         .parse(input);
       const privacy = tiktokPrivacyLevelSchema.parse(input.privacyLevel);
       assertPrivacyAllowed(privacy, audited);
+      // Like live: the level must be one the creator offers (creator_info).
+      if (!privacyOptions().includes(privacy)) {
+        throw new IntegrationError(
+          TIKTOK_POSTING_PROVIDER,
+          "permission_denied",
+          `This TikTok account does not offer ${privacy}.`,
+          { retryable: false },
+        );
+      }
       const publishId = `v_pub_file~v2-mock.${digest(input.accessToken, sourceUrl, caption).slice(0, 20)}`;
       publishes.set(publishId, { polls: 0, plan: planChunks(MOCK_VIDEO_SIZE) });
       return { publishId };
