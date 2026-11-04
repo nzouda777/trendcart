@@ -132,10 +132,7 @@ function toApprovalDTO(r: Row<typeof approval>): ApprovalDTO {
   };
 }
 
-export function toPostDTO(
-  r: Row<typeof tiktokPost>,
-  profileName: string | null,
-): TikTokPostDTO {
+export function toPostDTO(r: Row<typeof tiktokPost>, profileName: string | null): TikTokPostDTO {
   return {
     id: r.id,
     videoId: r.videoId,
@@ -185,7 +182,9 @@ async function postsByVideo(
   });
   if (posts.length === 0) return out;
   const profiles = await ctx.db.select(tiktokProfileConnection, {
-    where: inArray(tiktokProfileConnection.id, [...new Set(posts.map((p) => p.profileConnectionId))]),
+    where: inArray(tiktokProfileConnection.id, [
+      ...new Set(posts.map((p) => p.profileConnectionId)),
+    ]),
   });
   const names = new Map(profiles.map((p) => [p.id, p.displayName]));
   for (const p of posts) {

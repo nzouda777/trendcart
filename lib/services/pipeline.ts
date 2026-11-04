@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 
 import { findUnsafeClaims, sanitizeDescriptionHtml } from "@/lib/ai/copy-safety";
@@ -19,7 +19,6 @@ import {
   gateForStatus,
   missingGateParts,
   stepBackTarget,
-  type ApprovalEvidence,
   type GatePart,
 } from "@/lib/domain/state-machine";
 import {
@@ -29,8 +28,10 @@ import {
   shopifyConnection,
   shopifyProduct,
   supplierMatch,
+  video,
 } from "@/lib/db/schema";
 import { canWriteThemes } from "@/lib/integrations/shopify/config";
+import { isPostingAudited } from "@/lib/integrations/tiktok-posting/config";
 import { quoteSupplier, type SupplierQuote } from "@/lib/sourcing";
 import type { UserWorkspaceContext, WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
@@ -39,8 +40,10 @@ import {
   approvalState,
   decisionOrder,
   effectiveTemplateSuffix,
+  evidenceOf,
   gatePartStates,
   loadSupplierChoice,
+  loadVideosChoice,
   lockProduct,
   recordGateDecision,
   type SupplierChoicePayload,
@@ -56,6 +59,7 @@ import {
 } from "@/lib/workflows/steps/build";
 
 import { idSchema } from "./brands";
+import { loadAdAccounts, loadCampaignDTO, loadProfiles, runningLaunch } from "./campaign-read";
 import { resolveIntegrations, resolveNow, resolvePipeline, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
 import { getShopifyCredentialsFor } from "./internal/credentials";
@@ -170,7 +174,7 @@ function toShopifyPageDTO(
 
 /* Reads -------------------------------------------------------------------- */
 
-async function loadPipeline(
+export async function loadPipeline(
   ctx: WorkspaceContext,
   productId: string,
   ref?: ShopifyProductRef,
@@ -178,7 +182,18 @@ async function loadPipeline(
 ): Promise<ProductPipelineDTO> {
   const detail = await loadDetail(ctx, productId);
   const row = await ctx.db.getById(product, productId);
-  const [brandRow, suppliers, choice, stores, contentParts] = await Promise.all([
+  const [
+    brandRow,
+    suppliers,
+    choice,
+    stores,
+    contentParts,
+    videosChoice,
+    adAccounts,
+    tiktokProfiles,
+    campaignDTO,
+    launch,
+  ] = await Promise.all([
     ctx.db.getById(brand, row.brandId),
     ctx.db.select(supplierMatch, {
       where: eq(supplierMatch.productId, row.id),
@@ -190,6 +205,11 @@ async function loadPipeline(
       orderBy: (t) => t.createdAt,
     }),
     gatePartStates(ctx.db, row.id, "content_approval"),
+    loadVideosChoice(ctx.db, row.id),
+    loadAdAccounts(ctx.db, row.brandId),
+    loadProfiles(ctx.db, row.brandId),
+    loadCampaignDTO(ctx, row.id, now),
+    row.status === "ready_to_launch" ? runningLaunch(ctx.db, row.id, now) : null,
   ]);
 
   let shopify: ShopifyPageDTO | null = null;
@@ -255,6 +275,18 @@ async function loadPipeline(
     pagePublishClaim: claim
       ? { startedAt: claim.createdAt.toISOString(), stale: isStaleClaim(claim, now) }
       : null,
+    videosChoice: videosChoice
+      ? {
+          approvalId: videosChoice.approvalId,
+          videoIds: videosChoice.videoIds,
+          adConnectionId: videosChoice.adConnectionId,
+        }
+      : null,
+    adAccounts,
+    tiktokProfiles,
+    campaign: campaignDTO,
+    launchClaim: launch ? { startedAt: launch.startedAt.toISOString(), stale: launch.stale } : null,
+    postingAudited: isPostingAudited(),
   };
 }
 
@@ -644,17 +676,6 @@ export async function rejectSuppliers(
 }
 
 /* GATE 3: the page part ---------------------------------------------------- */
-
-function evidenceOf(recorded: Row<typeof approval>, parts?: readonly GatePart[]): ApprovalEvidence {
-  return {
-    id: recorded.id,
-    productId: recorded.productId,
-    gate: recorded.gate,
-    decision: recorded.decision,
-    userId: recorded.userId,
-    ...(parts ? { parts } : {}),
-  };
-}
 
 /**
  * The page approval of this product that has been "publishing" for longer
@@ -1221,6 +1242,17 @@ export async function goBackOneStep(
         throw new ServiceError(
           "invalid_state",
           "The page was already approved and published: it cannot go back to the supplier choice.",
+        );
+      }
+      // Approved videos live on this store's product: reject them first.
+      const onShopify = await tx.count(
+        video,
+        and(eq(video.productId, row.id), isNotNull(video.shopifyMediaId)),
+      );
+      if (onShopify > 0) {
+        throw new ServiceError(
+          "invalid_state",
+          "Approved videos are on the Shopify page: reject them before going back to the supplier choice.",
         );
       }
     }

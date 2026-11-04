@@ -143,5 +143,9 @@ export async function runningLaunch(db: ScopedDb, productId: string, now: Date) 
   const open = await findOpenJob(db, productId, "launch");
   if (!open || open.status !== "running") return null;
   const startedAt = open.updatedAt;
-  return { job: open, startedAt, stale: now.getTime() - startedAt.getTime() > STALE_LAUNCH_CLAIM_MS };
+  return {
+    job: open,
+    startedAt,
+    stale: now.getTime() - startedAt.getTime() > STALE_LAUNCH_CLAIM_MS,
+  };
 }
