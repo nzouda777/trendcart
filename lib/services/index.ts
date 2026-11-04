@@ -64,6 +64,15 @@ export {
   selectSupplier,
   updatePageCopy,
 } from "./pipeline";
+export { launchCampaign, pauseCampaign, resumeCampaign, updateCampaignBudget } from "./campaigns";
+export {
+  addVideo,
+  approveVideo,
+  approveVideos,
+  publishToProfile,
+  refreshTikTokPosts,
+  rejectVideo,
+} from "./videos";
 export { listMembers, type MemberDirectory } from "./team";
 export type * from "./types";
 export { getUsage, listUsage } from "./usage";
