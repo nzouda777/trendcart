@@ -7,11 +7,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Gate } from "@/lib/domain/contracts";
-import {
-  gatePartSchema,
-  type ApprovalEvidence,
-  type GatePart,
-} from "@/lib/domain/state-machine";
+import { gatePartSchema, type ApprovalEvidence, type GatePart } from "@/lib/domain/state-machine";
 import { approval, product } from "@/lib/db/schema";
 import type { NewRow, Row, ScopedDb } from "@/lib/tenant/scoped-db";
 
@@ -174,10 +170,7 @@ export async function loadVideosChoice(
 }
 
 /** The recorded approval as the state machine wants it (gate transitions). */
-export function evidenceOf(
-  recorded: ApprovalRow,
-  parts?: readonly GatePart[],
-): ApprovalEvidence {
+export function evidenceOf(recorded: ApprovalRow, parts?: readonly GatePart[]): ApprovalEvidence {
   return {
     id: recorded.id,
     productId: recorded.productId,

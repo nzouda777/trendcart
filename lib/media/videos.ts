@@ -34,25 +34,46 @@ export function shopifyVideoAlt(productName: string | null | undefined): string 
 /**
  * Uploads an approved candidate to the Shopify product: resolves a fresh
  * media URL (never stored), then the adapter streams it into a staged upload
- * and waits until the media is READY. A FAILED media is deleted and reported
- * as a retryable provider error.
+ * (through the brand proxy) and waits until the media is READY.
+ *
+ * - `idempotencyKey` = the Trendcart video id: calling again never adds a
+ *   second copy (it resumes polling a media still processing).
+ * - The source URL expired (retryable not_found): resolved again, once.
+ * - Still processing after the adapter's wait: ShopifyMediaProcessingError
+ *   (retryable, see isShopifyMediaProcessing) is rethrown for the caller to
+ *   try again later. A FAILED media is deleted by the adapter (non-retryable).
  */
 export async function uploadApprovedVideo(input: {
   integrations: Pick<Integrations, "shopify" | "tiktokData">;
   call: CallContext;
   creds: ShopifyCredentials;
   shopifyProductId: string;
+  videoId: string;
   tiktokUrl: string;
   alt: string;
 }): Promise<{ mediaId: string; fileUrl: string }> {
   const { integrations, creds, shopifyProductId } = input;
-  const fresh = await resolveFreshMedia(integrations.tiktokData, input.call, input.tiktokUrl);
-  const ref: ShopifyMediaRef = await integrations.shopify.attachVideoFromUrl(creds, {
-    productId: shopifyProductId,
-    sourceUrl: fresh.mediaUrl,
-    alt: input.alt,
-  });
+  const attach = async () => {
+    const fresh = await resolveFreshMedia(integrations.tiktokData, input.call, input.tiktokUrl);
+    return integrations.shopify.attachVideoFromUrl(creds, {
+      productId: shopifyProductId,
+      sourceUrl: fresh.mediaUrl,
+      alt: input.alt,
+      idempotencyKey: input.videoId,
+      ...(input.call.proxyUrl ? { proxyUrl: input.call.proxyUrl } : {}),
+    });
+  };
+  let ref: ShopifyMediaRef;
+  try {
+    ref = await attach();
+  } catch (error) {
+    const expiredSource =
+      error instanceof IntegrationError && error.code === "not_found" && error.retryable;
+    if (!expiredSource) throw error;
+    ref = await attach();
+  }
   if (ref.status !== "READY") {
+    // Mock / defensive: live deletes a FAILED media itself and throws.
     await integrations.shopify
       .deleteProductMedia(creds, { productId: shopifyProductId, mediaIds: [ref.mediaId] })
       .catch(() => undefined);

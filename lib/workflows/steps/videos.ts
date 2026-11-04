@@ -1,9 +1,9 @@
 /**
  * Step "build", videos part (runs after the page draft):
  *
- * 1. Gather: related TikTok videos of the same product
- *    (TikTokDataProvider.searchVideos on the first analysis keyword, in the
- *    brand country), stored as `video` candidates (origin "related_search")
+ * 1. Gather: related TikTok videos of the same product (findRelatedVideos
+ *    from lib/integrations/tiktok-data: several keyword searches in the brand
+ *    country, ranked against the imported video), the best ones stored as `video` candidates (origin "related_search")
  *    next to the imported one: URL, author, thumbnail URL and metadata only,
  *    never a media URL (lib/media/candidates). Searched once per product:
  *    a re-run (page rejection, retry) keeps the stored candidates.
@@ -38,9 +38,11 @@ import {
   relatedVideoQuery,
   resolveFreshMedia,
 } from "@/lib/media/candidates";
+import { findRelatedVideos } from "@/lib/integrations/tiktok-data";
 import type { Row } from "@/lib/tenant/scoped-db";
 
 import { buildCallContext } from "../call-context";
+import { TIKTOK_MEDIA_PROVIDER } from "./analyze";
 import { pageCopyVersion } from "../copy-version";
 import { gatePartStates } from "../gate-payloads";
 
@@ -100,24 +102,40 @@ export async function gatherRelatedVideos(
     and(eq(video.productId, row.id), eq(video.origin, "related_search")),
   );
   if (searched > 0) return 0;
-  const query = relatedVideoQuery(row.analysis);
-  if (!query) return 0;
+  if (!relatedVideoQuery(row.analysis)) return 0;
+
+  const stored = await db.select(video, { where: eq(video.productId, row.id) });
+  const imported = stored.find((v) => v.origin === "imported");
+  const importedId = (imported?.metadata as { tiktokVideoId?: unknown } | null)?.tiktokVideoId;
 
   let found;
   try {
-    found = await env.integrations.tiktokData.searchVideos(call, {
-      query,
+    found = await findRelatedVideos(env.integrations.tiktokData, call, {
+      analysis: { productName: row.analysis!.productName, keywords: row.analysis!.keywords },
+      ...(imported
+        ? {
+            imported: {
+              tiktokUrl: imported.tiktokUrl,
+              ...(typeof importedId === "string" ? { tiktokVideoId: importedId } : {}),
+            },
+          }
+        : {}),
+      excludeVideoIds: stored
+        .map((v) => (v.metadata as { tiktokVideoId?: unknown } | null)?.tiktokVideoId)
+        .filter((id): id is string => typeof id === "string"),
       country: brandRow.country,
       limit: MAX_RELATED_VIDEOS + SEARCH_SLACK,
     });
   } catch (error) {
-    // A refused query is not worth a retry: the product keeps its own video.
+    // Every search refused: not worth a retry, the product keeps its own video.
     if (error instanceof IntegrationError && !error.retryable) return 0;
     throw error;
   }
 
-  const stored = await db.select(video, { where: eq(video.productId, row.id) });
-  const fresh = newCandidates(found, new Set(stored.map((v) => v.tiktokUrl)));
+  const fresh = newCandidates(
+    found.ranked.map((r) => r.candidate),
+    new Set(stored.map((v) => v.tiktokUrl)),
+  );
   for (const candidate of fresh) {
     const fields = candidateVideoFields(candidate);
     assertNoMediaUrl(fields.metadata);
@@ -129,6 +147,12 @@ export async function gatherRelatedVideos(
     );
   }
   return fresh.length;
+}
+
+function isExpiredMedia(error: unknown): boolean {
+  return (
+    error instanceof IntegrationError && error.provider === TIKTOK_MEDIA_PROVIDER && error.retryable
+  );
 }
 
 const UNAVAILABLE = "This video is no longer available on TikTok.";
@@ -144,18 +168,30 @@ async function checkOne(
   let metadata: Record<string, unknown>;
   let compliance: ComplianceReport | null = null;
   try {
-    const fresh = await resolveFreshMedia(env.integrations.tiktokData, call, target.tiktokUrl);
-    const result = await env.metered(() =>
-      env.integrations.complianceChecker.check(call, {
-        durationSec: fresh.durationSec,
-        width: fresh.width,
-        height: fresh.height,
-        caption: fresh.caption,
-        claims: input.claims,
-        productCategory: input.category,
-        countries: input.countries,
-      }),
-    );
+    // The media URL expires quickly: resolved just in time, once more if the
+    // checker reports it expired (403/410), never stored.
+    let fresh = await resolveFreshMedia(env.integrations.tiktokData, call, target.tiktokUrl);
+    const run = () =>
+      env.metered(() =>
+        env.integrations.complianceChecker.check(call, {
+          durationSec: fresh.durationSec,
+          width: fresh.width,
+          height: fresh.height,
+          caption: fresh.caption,
+          claims: input.claims,
+          productCategory: input.category,
+          countries: input.countries,
+          mediaUrl: fresh.mediaUrl,
+        }),
+      );
+    let result;
+    try {
+      result = await run();
+    } catch (error) {
+      if (!isExpiredMedia(error)) throw error;
+      fresh = await resolveFreshMedia(env.integrations.tiktokData, call, target.tiktokUrl);
+      result = await run();
+    }
     compliance = result.data;
     metadata = { ...candidateMetadata(fresh), claimsVersion: input.version };
   } catch (error) {

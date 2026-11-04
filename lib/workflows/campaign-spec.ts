@@ -6,11 +6,7 @@
  * rotation, and a custom identity with the brand name. Spark Ads (creator
  * authorization codes) come later.
  */
-import {
-  campaignSpecSchema,
-  IntegrationError,
-  type CampaignSpec,
-} from "@/lib/domain/contracts";
+import { campaignSpecSchema, IntegrationError, type CampaignSpec } from "@/lib/domain/contracts";
 
 export const CALL_TO_ACTION = "SHOP_NOW";
 const MAX_AD_TEXT = 100;
@@ -76,7 +72,8 @@ export function buildCampaignSpec(input: CampaignSpecInput): CampaignSpec {
     ],
   };
   const parsed = campaignSpecSchema.safeParse(spec);
-  if (!parsed.success) fatal(`The campaign could not be prepared: ${parsed.error.issues[0]?.message}`);
+  if (!parsed.success)
+    fatal(`The campaign could not be prepared: ${parsed.error.issues[0]?.message}`);
   return spec;
 }
 
