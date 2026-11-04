@@ -30,7 +30,7 @@ import {
   assertBudgetBodyHasNoStatus,
   budgetModeFor,
   campaignBudgetBody,
-  validateBudgetUpdate,
+  validateBudgetForCurrency,
 } from "./budget";
 import {
   adsRequest,
@@ -58,7 +58,6 @@ import {
   campaignCreateBody,
   CreatedEnabledError,
   identityKey,
-  TOTAL_BUDGET_DAYS,
   validateSpecForTikTok,
   type ResolvedIdentity,
 } from "./spec";
@@ -760,6 +759,9 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
     async createPausedCampaign(rawCreds, rawSpec): Promise<CampaignIds> {
       const creds = tiktokAdsCredentialsSchema.parse(rawCreds);
       const spec = validateSpecForTikTok(rawSpec);
+      // Budget minimum and precision in the advertiser currency (budget.ts),
+      // checked before anything is created.
+      validateBudgetForCurrency(spec.budget, (await advertiserInfo(creds)).currency);
 
       // Identities first: nothing is created if a Spark code or video is bad.
       const identities = new Map<string, string>();
@@ -922,7 +924,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
       const creds = tiktokAdsCredentialsSchema.parse(rawCreds);
       const ids = campaignIdsSchema.parse(input.ids);
       const { currency } = await advertiserInfo(creds);
-      const budget = validateBudgetUpdate(input.budget, currency, TOTAL_BUDGET_DAYS);
+      const budget = validateBudgetForCurrency(input.budget, currency);
       const mode = budgetModeFor(budget.mode);
 
       // The entities must belong to the campaign, carry the budget at the

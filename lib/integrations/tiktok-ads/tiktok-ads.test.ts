@@ -15,7 +15,12 @@ import { quoteBigIds, requestIdFor, TimeBudgetError, withRetry } from "./http";
 import { STATS_CALL_BUDGET_MS, STATS_MAX_WINDOW_HOURS } from "./limits";
 import { createTikTokAdsClient } from "./index";
 import { createLiveTikTokAdsClient, type LiveTikTokAdsOptions } from "./live";
-import { BUDGET_FLOORS } from "./budget";
+import {
+  currencyDecimals,
+  MIN_DAILY_BUDGET,
+  minimumBudget,
+  validateBudgetForCurrency,
+} from "./budget";
 import { createMockTikTokAdsClient, MOCK_ADS_AUTH_CODE, MOCK_ADVERTISERS } from "./mock";
 import { noopRateLimiter, type RateLimiter } from "./rate-limit";
 import { localDatesFor, localToUtc } from "./report";
@@ -123,6 +128,8 @@ function live(fetch: typeof globalThis.fetch, extra: Partial<LiveTikTokAdsOption
 
 /** Routes for a fresh account: nothing exists yet. */
 const freshRoutes = () => ({
+  // EUR advertiser (Europe/Paris): budgets are checked in EUR before creation.
+  "GET advertiser/info/": fx.advertiser_info_paris,
   "GET identity/get/": fx.identity_get_empty,
   "POST identity/create/": fx.identity_create,
   "POST tt_video/authorize/": fx.tt_video_authorize,
@@ -293,7 +300,7 @@ describe("tiktok ads mock: contract conformance", () => {
       advertiserId: MOCK_ADVERTISERS.find((a) => a.currency === "USD")!.advertiserId,
     };
     const ids = await client.createPausedCampaign(usd, spec);
-    const floor = BUDGET_FLOORS.USD!.adGroupDaily;
+    const floor = MIN_DAILY_BUDGET.USD!.adGroupDaily;
     await expect(
       client.updateBudget(usd, {
         ids,
@@ -315,7 +322,11 @@ describe("tiktok ads mock: contract conformance", () => {
     await expect(
       client.updateBudget(usd, {
         ids: cbo,
-        budget: { mode: "daily", amount: BUDGET_FLOORS.USD!.campaign - 1, level: "campaign" },
+        budget: {
+          mode: "daily",
+          amount: MIN_DAILY_BUDGET.USD!.campaignDaily - 1,
+          level: "campaign",
+        },
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
@@ -984,12 +995,12 @@ describe("tiktok ads live: updateBudget", () => {
       // Under the USD ad group daily minimum.
       [
         withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"),
-        { mode: "daily", amount: BUDGET_FLOORS.USD!.adGroupDaily - 0.01, level: "ad_group" },
+        { mode: "daily", amount: MIN_DAILY_BUDGET.USD!.adGroupDaily - 0.01, level: "ad_group" },
       ],
       // Under the USD campaign minimum.
       [
         withModes("BUDGET_MODE_DAY", "BUDGET_MODE_DAY"),
-        { mode: "daily", amount: BUDGET_FLOORS.USD!.campaign - 1, level: "campaign" },
+        { mode: "daily", amount: MIN_DAILY_BUDGET.USD!.campaignDaily - 1, level: "campaign" },
       ],
       // Daily → total cannot be switched.
       [
@@ -1165,5 +1176,276 @@ describe("safety: tests can never launch a real campaign", () => {
 
   it("the test runner runs in mock mode", () => {
     expect(process.env.INTEGRATIONS_MODE ?? "mock").toBe("mock");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Per-currency budget minimums and precision (budget.ts)                     */
+/* -------------------------------------------------------------------------- */
+
+describe("tiktok ads budget: per-currency minimums and precision", () => {
+  const min = (currency: string, level: "campaign" | "ad_group", mode: "daily" | "total") =>
+    minimumBudget({ currency, level, mode });
+
+  it("returns the documented daily minimums per currency (inclusive)", () => {
+    const expected: Record<string, [campaign: number, adGroup: number]> = {
+      USD: [50, 20],
+      EUR: [50, 20],
+      GBP: [50, 20],
+      CAD: [50, 20],
+      AUD: [50, 20],
+      BRL: [50, 20],
+      CHF: [50, 20],
+      JPY: [5_000, 2_000],
+      INR: [5_000, 2_000],
+      MXN: [500, 200],
+      PLN: [200, 80],
+      PHP: [2_500, 1_000],
+      KRW: [50_000, 20_000],
+      IDR: [500_000, 200_000],
+      VND: [500_000, 200_000],
+    };
+    for (const [currency, [campaign, adGroup]] of Object.entries(expected)) {
+      expect(min(currency, "campaign", "daily")).toEqual({ amount: campaign, currency });
+      expect(min(currency, "ad_group", "daily")).toEqual({ amount: adGroup, currency });
+    }
+    expect(Object.keys(MIN_DAILY_BUDGET)).toHaveLength(56);
+  });
+
+  it("total budgets: campaign = daily minimum, ad group = daily minimum x scheduled days", () => {
+    expect(min("EUR", "campaign", "total")).toEqual({ amount: 50, currency: "EUR" });
+    expect(min("EUR", "ad_group", "total")).toEqual({ amount: 140, currency: "EUR" });
+    expect(min("JPY", "ad_group", "total")).toEqual({ amount: 14_000, currency: "JPY" });
+    expect(
+      minimumBudget({ currency: "USD", level: "ad_group", mode: "total", scheduledDays: 31 }),
+    ).toEqual({ amount: 620, currency: "USD" });
+  });
+
+  it("normalizes the currency code", () => {
+    expect(min(" gbp ", "ad_group", "daily")).toEqual({ amount: 20, currency: "GBP" });
+  });
+
+  it("returns null for currencies without an official figure", () => {
+    for (const currency of ["KWD", "BGN", "MAD", "XYZ", ""]) {
+      expect(min(currency, "campaign", "daily")).toBeNull();
+      expect(min(currency, "ad_group", "total")).toBeNull();
+    }
+  });
+
+  it("currencyDecimals follows TikTok's precision table, then ISO 4217", () => {
+    expect(currencyDecimals("USD")).toBe(2);
+    expect(currencyDecimals("EUR")).toBe(2);
+    expect(currencyDecimals("JPY")).toBe(0);
+    expect(currencyDecimals("IDR")).toBe(0);
+    expect(currencyDecimals("KRW")).toBe(0);
+    expect(currencyDecimals("VND")).toBe(0);
+    // TikTok takes whole numbers for HUF and TWD although ISO gives them 2.
+    expect(currencyDecimals("HUF")).toBe(0);
+    expect(currencyDecimals("TWD")).toBe(0);
+    expect(currencyDecimals("KWD")).toBe(3);
+    expect(currencyDecimals("jpy")).toBe(0);
+    // Not listed by TikTok: ISO minor units, else 2.
+    expect(currencyDecimals("BIF")).toBe(0);
+    expect(currencyDecimals("not-a-code")).toBe(2);
+  });
+
+  it("validateBudgetForCurrency refuses too many decimals or an amount under the minimum", () => {
+    const bad: [CampaignSpec["budget"], string | undefined][] = [
+      [{ mode: "daily", amount: 2_000.5, level: "ad_group" }, "JPY"],
+      [{ mode: "daily", amount: 1_999, level: "ad_group" }, "JPY"],
+      [{ mode: "daily", amount: 4_999, level: "campaign" }, "JPY"],
+      [{ mode: "total", amount: 13_999, level: "ad_group" }, "JPY"],
+      [{ mode: "daily", amount: 199_999, level: "ad_group" }, "IDR"],
+      [{ mode: "daily", amount: 250_000.5, level: "ad_group" }, "IDR"],
+      [{ mode: "daily", amount: 19.99, level: "ad_group" }, "EUR"],
+      [{ mode: "daily", amount: 49, level: "campaign" }, "GBP"],
+      [{ mode: "daily", amount: 199, level: "ad_group" }, "MXN"],
+      [{ mode: "daily", amount: 20.005, level: "ad_group" }, "EUR"],
+      [{ mode: "daily", amount: 10.0001, level: "ad_group" }, "KWD"],
+      [{ mode: "daily", amount: 20.005, level: "ad_group" }, undefined],
+    ];
+    for (const [budget, currency] of bad) {
+      expect(() => validateBudgetForCurrency(budget, currency)).toThrow(IntegrationError);
+    }
+    const good: [CampaignSpec["budget"], string | undefined][] = [
+      [{ mode: "daily", amount: 2_000, level: "ad_group" }, "JPY"],
+      [{ mode: "total", amount: 14_000, level: "ad_group" }, "JPY"],
+      [{ mode: "daily", amount: 200_000, level: "ad_group" }, "IDR"],
+      [{ mode: "daily", amount: 20, level: "ad_group" }, "EUR"],
+      [{ mode: "daily", amount: 50.01, level: "campaign" }, "GBP"],
+      // No official minimum: only precision is checked locally.
+      [{ mode: "daily", amount: 1.125, level: "ad_group" }, "KWD"],
+      [{ mode: "daily", amount: 1, level: "campaign" }, "BGN"],
+      [{ mode: "daily", amount: 1, level: "campaign" }, undefined],
+    ];
+    for (const [budget, currency] of good) {
+      expect(validateBudgetForCurrency(budget, currency)).toEqual(budget);
+    }
+  });
+});
+
+describe("tiktok ads budget: create and update refusals in non-USD currencies", () => {
+  const advertiserInfo = (currency: string) => ({
+    code: 0,
+    message: "OK",
+    data: {
+      list: [{ advertiser_id: creds.advertiserId, currency, timezone: "Asia/Tokyo" }],
+    },
+  });
+  const posts = (calls: { method: string; path: string }[]) =>
+    calls.filter((c) => c.method === "POST").map((c) => c.path);
+
+  it("live createPausedCampaign refuses a JPY budget under the minimum or with decimals, before any write", async () => {
+    for (const budget of [
+      { mode: "daily", amount: 1_999, level: "ad_group" },
+      { mode: "daily", amount: 2_500.5, level: "ad_group" },
+      { mode: "daily", amount: 4_999, level: "campaign" },
+    ] as const) {
+      const { fetch, calls } = fixtureFetch({
+        ...freshRoutes(),
+        "GET advertiser/info/": advertiserInfo("JPY"),
+      });
+      await expect(
+        live(fetch).createPausedCampaign(creds, { ...spec, budget }),
+      ).rejects.toMatchObject({ code: "invalid_input", retryable: false });
+      expect(posts(calls)).toEqual([]);
+    }
+  });
+
+  it("live createPausedCampaign accepts a JPY budget at the minimum", async () => {
+    const { fetch, calls } = fixtureFetch({
+      ...freshRoutes(),
+      "GET advertiser/info/": advertiserInfo("JPY"),
+    });
+    await expect(
+      live(fetch).createPausedCampaign(creds, {
+        ...spec,
+        budget: { mode: "daily", amount: 2_000, level: "ad_group" },
+      }),
+    ).resolves.toEqual(createdIds);
+    expect(posts(calls)).toContain("campaign/create/");
+  });
+
+  it("live createPausedCampaign skips the local minimum for an undocumented currency", async () => {
+    const { fetch } = fixtureFetch({
+      ...freshRoutes(),
+      "GET advertiser/info/": advertiserInfo("BGN"),
+    });
+    await expect(
+      live(fetch).createPausedCampaign(creds, {
+        ...spec,
+        budget: { mode: "daily", amount: 5, level: "ad_group" },
+      }),
+    ).resolves.toEqual(createdIds);
+  });
+
+  it("live updateBudget refuses JPY, IDR and EUR amounts TikTok would reject", async () => {
+    const routes = (currency: string) => ({
+      "GET advertiser/info/": advertiserInfo(currency),
+      "GET campaign/get/": {
+        code: 0,
+        data: {
+          list: [{ campaign_id: createdIds.campaignId, budget_mode: "BUDGET_MODE_INFINITE" }],
+          page_info: { page: 1, total_page: 1 },
+        },
+      },
+      "GET adgroup/get/": {
+        code: 0,
+        data: {
+          list: [{ adgroup_id: createdIds.adGroups[0]!.adGroupId, budget_mode: "BUDGET_MODE_DAY" }],
+          page_info: { page: 1, total_page: 1 },
+        },
+      },
+      "POST adgroup/update/": { code: 0, message: "OK", data: {} },
+    });
+    const cases = [
+      ["JPY", 1_999],
+      ["JPY", 2_000.5],
+      ["IDR", 199_999],
+      ["IDR", 200_000.25],
+      ["EUR", 19.99],
+    ] as const;
+    for (const [currency, amount] of cases) {
+      const { fetch, calls } = fixtureFetch(routes(currency));
+      await expect(
+        live(fetch).updateBudget!(creds, {
+          ids: createdIds,
+          budget: { mode: "daily", amount, level: "ad_group" },
+        }),
+      ).rejects.toMatchObject({ code: "invalid_input", retryable: false });
+      expect(posts(calls)).toEqual([]);
+    }
+    const ok = fixtureFetch(routes("JPY"));
+    await live(ok.fetch).updateBudget!(creds, {
+      ids: createdIds,
+      budget: { mode: "daily", amount: 2_000, level: "ad_group" },
+    });
+    expect(posts(ok.calls)).toEqual(["adgroup/update/"]);
+  });
+
+  it("mock refuses EUR budgets under the minimum on create and on update", async () => {
+    const client = createMockTikTokAdsClient();
+    const eur = {
+      ...creds,
+      advertiserId: MOCK_ADVERTISERS.find((a) => a.currency === "EUR")!.advertiserId,
+    };
+    await expect(
+      client.createPausedCampaign(eur, {
+        ...spec,
+        budget: { mode: "daily", amount: 19.99, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(
+      client.createPausedCampaign(eur, {
+        ...spec,
+        budget: { mode: "total", amount: 139, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    const ids = await client.createPausedCampaign(eur, spec);
+    await expect(
+      client.updateBudget(eur, {
+        ids,
+        budget: { mode: "daily", amount: 19, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(client.budgetOf(ids.adGroups[0]!.adGroupId)).toBe(50);
+    await client.updateBudget(eur, {
+      ids,
+      budget: { mode: "daily", amount: 20, level: "ad_group" },
+    });
+    expect(client.budgetOf(ids.adGroups[0]!.adGroupId)).toBe(20);
+  });
+
+  it("mock and live accept and refuse the same budgets for the same currency", async () => {
+    const eurCreds = {
+      ...creds,
+      advertiserId: MOCK_ADVERTISERS.find((a) => a.currency === "EUR")!.advertiserId,
+    };
+    const budgets: CampaignSpec["budget"][] = [
+      { mode: "daily", amount: 20, level: "ad_group" },
+      { mode: "daily", amount: 19.99, level: "ad_group" },
+      { mode: "daily", amount: 20.001, level: "ad_group" },
+      { mode: "total", amount: 140, level: "ad_group" },
+      { mode: "total", amount: 139.99, level: "ad_group" },
+      { mode: "daily", amount: 50, level: "campaign" },
+      { mode: "daily", amount: 49.99, level: "campaign" },
+      { mode: "total", amount: 50, level: "campaign" },
+    ];
+    const outcome = (p: Promise<unknown>) =>
+      p.then(
+        () => "ok",
+        (e: unknown) => (e instanceof IntegrationError ? e.code : "other"),
+      );
+    for (const budget of budgets) {
+      // The live fixtures answer as the EUR advertiser with this id.
+      const { fetch } = fixtureFetch(freshRoutes());
+      const liveResult = await outcome(
+        live(fetch).createPausedCampaign(eurCreds, { ...spec, budget }),
+      );
+      const mockResult = await outcome(
+        createMockTikTokAdsClient().createPausedCampaign(eurCreds, { ...spec, budget }),
+      );
+      expect({ budget, result: mockResult }).toEqual({ budget, result: liveResult });
+    }
   });
 });

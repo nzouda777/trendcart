@@ -13,11 +13,11 @@ import {
   type TikTokAdvertiser,
 } from "@/lib/domain/contracts";
 
-import { validateBudgetUpdate } from "./budget";
+import { validateBudgetForCurrency } from "./budget";
 import { TIKTOK_ADS_PROVIDER } from "./config";
 import { STATS_MAX_WINDOW_HOURS } from "./limits";
 import { statsWindow } from "./report";
-import { TOTAL_BUDGET_DAYS, validateSpecForTikTok } from "./spec";
+import { validateSpecForTikTok } from "./spec";
 
 /*
  * Deterministic in-memory TikTok Ads. Never touches the network.
@@ -35,7 +35,9 @@ import { TOTAL_BUDGET_DAYS, validateSpecForTikTok } from "./spec";
  * per UTC hour (window capped like live).
  *
  * Advertisers: one EUR and one USD account, so the brand-currency match and
- * mismatch paths (B1) are both testable. Floors apply to USD only (budget.ts).
+ * mismatch paths (B1) are both testable. Budgets are checked against the
+ * advertiser currency's official minimum and precision on create and on
+ * update, like live (budget.ts).
  */
 
 export const MOCK_ADS_AUTH_CODE = "mock-ads-auth-code";
@@ -71,6 +73,11 @@ function numericId(prefix: string, len: number, ...parts: string[]): string {
 }
 
 const HOUR_MS = 3_600_000;
+
+/** Currency of a mock advertiser (undefined for an unknown id: no local check). */
+function mockCurrency(advertiserId: string): string | undefined {
+  return MOCK_ADVERTISERS.find((a) => a.advertiserId === advertiserId)?.currency;
+}
 
 export type MockEntityStatus = "DISABLE" | "ENABLE";
 
@@ -148,6 +155,7 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
     async createPausedCampaign(creds, rawSpec) {
       const c = tiktokAdsCredentialsSchema.parse(creds);
       const spec = validateSpecForTikTok(rawSpec);
+      validateBudgetForCurrency(spec.budget, mockCurrency(c.advertiserId));
       const campaignId = numericId("17", 19, c.advertiserId, spec.name);
       // Like live: an enabled campaign of the same name is never reused.
       if (statuses.get(campaignId) === "ENABLE") {
@@ -211,8 +219,7 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
     async updateBudget(creds, input) {
       const c = tiktokAdsCredentialsSchema.parse(creds);
       const ids = campaignIdsSchema.parse(input.ids);
-      const currency = MOCK_ADVERTISERS.find((a) => a.advertiserId === c.advertiserId)?.currency;
-      const budget = validateBudgetUpdate(input.budget, currency, TOTAL_BUDGET_DAYS);
+      const budget = validateBudgetForCurrency(input.budget, mockCurrency(c.advertiserId));
       assertKnown(ids);
       const current = budgets.get(ids.campaignId);
       if (!current) {

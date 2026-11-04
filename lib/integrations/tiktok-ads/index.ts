@@ -5,7 +5,13 @@ import { createMockTikTokAdsClient } from "./mock";
 
 export { NotImplementedIntegrationError, UnsafeActionError } from "./safety";
 export { MARKETING_API_VERSION } from "./config";
-export { BUDGET_FLOORS, minimumBudget } from "./budget";
+export {
+  CURRENCY_DECIMALS,
+  currencyDecimals,
+  MIN_DAILY_BUDGET,
+  minimumBudget,
+  type MinDailyBudget,
+} from "./budget";
 export { TimeBudgetError } from "./http";
 export { STATS_CALL_BUDGET_MS, STATS_MAX_WINDOW_HOURS } from "./limits";
 

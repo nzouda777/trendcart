@@ -6,11 +6,15 @@ import { getSystemContext, listLaunchedCampaigns } from "@/lib/tenant/system";
 
 import { isAuthorizedCron } from "../tiktok-token-refresh/refresh";
 
+/** Seconds (Vercel Pro); the sync itself stops starting campaigns after 240 s. */
+export const maxDuration = 300;
+
 /**
  * GET /api/cron/tiktok-stats — Vercel Cron (hourly). Requires
  * `Authorization: Bearer $CRON_SECRET`; refuses everything when unset.
  * Syncs campaign_stats_hourly for launched campaigns, one system context per
- * workspace.
+ * workspace, least recently synced first, within a 240 s run budget
+ * (STATS_RUN_BUDGET_MS) so the function ends under `maxDuration`.
  * The cross-workspace scan (ids only) is `listLaunchedCampaigns`.
  */
 export async function GET(request: Request) {
