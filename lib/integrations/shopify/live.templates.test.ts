@@ -55,13 +55,11 @@ const op = (c: Call) => /(?:query|mutation)\s+(\w+)/.exec(c.query)?.[1];
 describe("live deleteProductTemplate", () => {
   it("deletes templates/product.tc-*.json from the MAIN theme", async () => {
     const { fetch, calls } = replay({ body: fx.mainTheme }, { body: fx.deleted });
-    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual(
-      { deleted: true },
-    );
+    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual({
+      deleted: true,
+    });
     expect(calls.map(op)).toEqual(["TrendcartMainTheme", "TrendcartThemeFilesDelete"]);
-    expect(calls[1]!.url).toBe(
-      "https://some-shop.myshopify.com/admin/api/2026-10/graphql.json",
-    );
+    expect(calls[1]!.url).toBe("https://some-shop.myshopify.com/admin/api/2026-10/graphql.json");
     expect(calls[1]!.variables).toEqual({
       themeId: "gid://shopify/OnlineStoreTheme/529529152",
       files: ["templates/product.tc-prod_123.json"],
@@ -70,16 +68,16 @@ describe("live deleteProductTemplate", () => {
 
   it("is idempotent: an already-missing file is not an error", async () => {
     const { fetch } = replay({ body: fx.mainTheme }, { body: fx.alreadyGone });
-    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual(
-      { deleted: false },
-    );
+    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual({
+      deleted: false,
+    });
   });
 
   it("no published theme: nothing to delete, no mutation", async () => {
     const { fetch, calls } = replay({ body: fx.noMainTheme });
-    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual(
-      { deleted: false },
-    );
+    await expect(client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX })).resolves.toEqual({
+      deleted: false,
+    });
     expect(calls).toHaveLength(1);
   });
 
@@ -120,7 +118,11 @@ describe("live deleteProductTemplate", () => {
 
   it("deletes when the product is a draft, uses another template, or is gone", async () => {
     for (const product of [fx.productDraftUsing, fx.productActiveOther, fx.productGone]) {
-      const { fetch, calls } = replay({ body: product }, { body: fx.mainTheme }, { body: fx.deleted });
+      const { fetch, calls } = replay(
+        { body: product },
+        { body: fx.mainTheme },
+        { body: fx.deleted },
+      );
       await expect(
         client(fetch).deleteProductTemplate(creds, { suffix: SUFFIX, productId: PRODUCT }),
       ).resolves.toEqual({ deleted: true });
@@ -158,7 +160,9 @@ describe("live deleteProductTemplate", () => {
     expect(o.message).toMatch(/themeFilesDelete failed/);
 
     const denied = replay({ body: fx.mainTheme }, { body: fx.accessDenied });
-    const e = await rejection(client(denied.fetch).deleteProductTemplate(creds, { suffix: SUFFIX }));
+    const e = await rejection(
+      client(denied.fetch).deleteProductTemplate(creds, { suffix: SUFFIX }),
+    );
     expect(e.code).toBe("permission_denied");
     expect(e.retryable).toBe(false);
   });

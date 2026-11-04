@@ -264,7 +264,7 @@ const MAX_RAW_TEXT = 8000;
 export function liquidSafeText(value: string, max: number, multiline = false): string {
   const plain = plainText(value.slice(0, MAX_RAW_TEXT), MAX_RAW_TEXT, multiline);
   let text = plain;
-  for (let previous = ""; previous !== text; ) {
+  for (let previous = ""; previous !== text;) {
     previous = text;
     text = text.replace(LIQUID_SPAN, " ");
   }

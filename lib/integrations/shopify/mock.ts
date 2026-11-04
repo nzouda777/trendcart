@@ -499,9 +499,13 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
     async deleteProductTemplate(creds, input) {
       assertCreds(creds);
       if (!isGeneratedTemplateSuffix(input.suffix)) {
-        throw shopifyError("invalid_input", "Mock Shopify: only product.tc-*.json can be deleted.", {
-          retryable: false,
-        });
+        throw shopifyError(
+          "invalid_input",
+          "Mock Shopify: only product.tc-*.json can be deleted.",
+          {
+            retryable: false,
+          },
+        );
       }
       if (input.productId !== undefined) {
         if (!/^gid:\/\/shopify\/Product\/\d+$/.test(input.productId)) {

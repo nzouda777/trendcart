@@ -277,7 +277,11 @@ describe("listLaunchedCampaigns", () => {
       const at = new Date(now.getTime() + run * HOUR);
       for (const ref of await listLaunchedCampaigns({ limit: 2, now: at }, db)) {
         seen.add(ref.campaignId);
-        await markCampaignStatsSynced(getSystemContext(ref.workspaceId, "t", db), ref.campaignId, at);
+        await markCampaignStatsSynced(
+          getSystemContext(ref.workspaceId, "t", db),
+          ref.campaignId,
+          at,
+        );
       }
     }
     expect(seen).toEqual(all);
