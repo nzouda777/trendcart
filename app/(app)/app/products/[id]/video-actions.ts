@@ -10,6 +10,7 @@ import {
   approveVideo,
   approveVideos,
   publishToProfile,
+  recheckVideo,
   refreshTikTokPosts,
   rejectVideo,
   type ServiceFailure,
@@ -111,6 +112,8 @@ export async function addVideoAction(
 
 const approveVideosInput = z.object({
   adConnectionId: z.string().trim().min(1).optional(),
+  /** 1 brand unit = fxRate advertiser units (only when the currencies differ). */
+  fxRate: z.number().positive().finite().max(1_000_000).optional(),
   note: z.string().max(2000).optional(),
 });
 
@@ -121,22 +124,54 @@ const approveVideosInput = z.object({
  */
 export async function approveVideosAction(
   productId: string,
-  input: { adConnectionId?: string; note?: string },
+  input: { adConnectionId?: string; fxRate?: number; note?: string },
 ): Promise<ActionResult> {
   const parsed = approveVideosInput.safeParse(input);
   if (!parsed.success) {
-    return { ok: false, code: "invalid_input", error: "Choose a TikTok Ads account." };
+    const fxError = parsed.error.issues.some((i) => i.path[0] === "fxRate");
+    return fxError
+      ? {
+          ok: false,
+          code: "invalid_input",
+          error: "Enter the exchange rate as a number above zero.",
+          fieldErrors: { fxRate: ["Enter a number above zero."] },
+        }
+      : { ok: false, code: "invalid_input", error: "Choose a TikTok Ads account." };
   }
   const result = await runAction(async (ctx) => {
     await approveVideos(ctx, {
       productId,
       adConnectionId: parsed.data.adConnectionId,
+      ...(parsed.data.fxRate !== undefined ? { fxRate: parsed.data.fxRate } : {}),
       note: optionalText(parsed.data.note),
     });
     return undefined;
   });
   if (result.ok) refresh();
-  return explain(result, { conflict: CONFLICT, forbidden: VIDEO_FORBIDDEN });
+  return explain(result, {
+    conflict: CONFLICT,
+    forbidden: "Only a Media buyer or the Owner can choose the TikTok Ads account.",
+  });
+}
+
+/**
+ * GATE 3: runs the ad rules check of one video again (an incomplete review,
+ * or a report made against older ad texts). Decides nothing.
+ */
+export async function recheckVideoAction(
+  productId: string,
+  videoId: string,
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await recheckVideo(ctx, { productId, videoId });
+    return undefined;
+  });
+  if (result.ok) refresh();
+  return explain(result, {
+    conflict: CONFLICT,
+    forbidden: VIDEO_FORBIDDEN,
+    rate_limited: "Too many paid checks for now. Try again later.",
+  });
 }
 
 const PRIVACY_LEVELS = [

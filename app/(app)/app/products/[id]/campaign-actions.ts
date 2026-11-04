@@ -44,10 +44,14 @@ export async function launchCampaignAction(
     await launchCampaign(ctx, { productId, note: input.note?.trim() || undefined });
     return undefined;
   });
+  // A failed launch is invalid_state with reason launch_failed_paused or
+  // launch_failed_not_paused: the service message says whether anything may
+  // be spending, and explain() refreshes so the failure shows.
   if (result.ok || result.code === "integration") refresh();
   return explain(result, {
     forbidden: CAMPAIGN_FORBIDDEN,
-    integration: "TikTok refused the launch. The campaign was paused again; nothing is spending.",
+    integration:
+      "TikTok refused the launch. Check the campaign state on this screen before trying again.",
   });
 }
 
@@ -57,7 +61,10 @@ export async function pauseCampaignAction(productId: string): Promise<ActionResu
     return undefined;
   });
   if (result.ok) refresh();
-  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+  return explain(result, {
+    forbidden: CAMPAIGN_FORBIDDEN,
+    conflict: "The campaign changed in the meantime. The screen was refreshed: try again.",
+  });
 }
 
 export async function resumeCampaignAction(productId: string): Promise<ActionResult> {
@@ -66,13 +73,17 @@ export async function resumeCampaignAction(productId: string): Promise<ActionRes
     return undefined;
   });
   if (result.ok) refresh();
-  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+  return explain(result, {
+    forbidden: CAMPAIGN_FORBIDDEN,
+    conflict: "The campaign changed in the meantime. The screen was refreshed: try again.",
+  });
 }
 
 /**
- * Changes the daily budget amount. While the TikTok adapter cannot change
- * budgets the service answers precondition_failed: the failure is marked so
- * the dialog shows it as unavailable instead of offering a retry.
+ * Changes the daily budget amount (ad account currency). If the TikTok
+ * adapter cannot change budgets the service answers precondition_failed "not
+ * supported": that failure is marked so the dialog shows it as unavailable
+ * instead of offering a retry.
  */
 export async function updateCampaignBudgetAction(
   productId: string,
@@ -94,7 +105,9 @@ export async function updateCampaignBudgetAction(
     refresh();
     return result;
   }
-  if (result.code === "precondition_failed") {
+  // Only the adapter lacking updateBudget is "unavailable"; other refusals
+  // (launch in flight, over the cap) keep the service message.
+  if (result.code === "precondition_failed" && /not supported/i.test(result.error)) {
     return {
       ...result,
       error:
@@ -102,5 +115,8 @@ export async function updateCampaignBudgetAction(
       fieldErrors: { amount: [BUDGET_UNSUPPORTED] },
     };
   }
-  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+  return explain(result, {
+    forbidden: CAMPAIGN_FORBIDDEN,
+    conflict: "The campaign changed in the meantime. The screen was refreshed: try again.",
+  });
 }

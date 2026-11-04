@@ -6,6 +6,7 @@ import {
   FilmIcon,
   LoaderIcon,
   PlusIcon,
+  RefreshCwIcon,
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
@@ -36,8 +37,6 @@ const ORIGIN_LABEL: Record<VideoDTO["origin"], string> = {
   related_search: "Found by search",
   user_supplied: "Added by your team",
 };
-
-const USABLE = new Set(["active", "expiring"]);
 
 type Meta = {
   durationSec?: number;
@@ -84,6 +83,10 @@ export type VideoReviewProps = {
   pagePart: GatePartState;
   videosPart: GatePartState;
   canReview: boolean;
+  /** Owner / media buyer: may choose the TikTok Ads account and approve the videos part. */
+  canChooseAdAccount: boolean;
+  /** Brand selling currency (the exchange rate is 1 brand unit = ? advertiser units). */
+  brandCurrency: string;
   canPublish: boolean;
   approverLabel: string;
   adAccounts: TikTokAdAccountOptionDTO[];
@@ -95,7 +98,12 @@ export type VideoReviewProps = {
   onApprove: (videoId: string) => Promise<ActionResult>;
   onReject: (videoId: string, input: { note?: string }) => Promise<ActionResult>;
   onAdd: (input: { url: string }) => Promise<ActionResult>;
-  onApproveVideos: (input: { adConnectionId?: string; note?: string }) => Promise<ActionResult>;
+  onRecheck: (videoId: string) => Promise<ActionResult>;
+  onApproveVideos: (input: {
+    adConnectionId?: string;
+    fxRate?: number;
+    note?: string;
+  }) => Promise<ActionResult>;
   onPublish: (input: PublishRequest) => Promise<ActionResult>;
 };
 
@@ -170,12 +178,14 @@ function VideoCard({
   defaultCaption,
   onApprove,
   onReject,
+  onRecheck,
   onPublish,
 }: VideoReviewProps & { video: VideoDTO }) {
   const meta = metaOf(v);
   const pill = approvalPill(v);
   const blocker = approveBlocker(v);
   const [pending, startTransition] = useTransition();
+  const [rechecking, startRecheck] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const uid = useId();
@@ -203,6 +213,31 @@ function VideoCard({
       {pending ? "Uploading to Shopify…" : approveLabel}
     </Button>
   );
+
+  const canRecheck =
+    open && canReview && v.approval !== "rejected" && (v.complianceOutdated || !!v.checkError);
+  const recheckButton = canRecheck ? (
+    <Button
+      variant="outline"
+      size="lg"
+      disabled={pending || rechecking}
+      aria-busy={rechecking}
+      onClick={() => {
+        setError(null);
+        startRecheck(async () => {
+          const result = await onRecheck(v.id);
+          if (!result.ok) setError(result.error);
+        });
+      }}
+    >
+      {rechecking ? (
+        <LoaderIcon aria-hidden="true" className="motion-safe:animate-spin" />
+      ) : (
+        <RefreshCwIcon aria-hidden="true" />
+      )}
+      {rechecking ? "Checking…" : "Check again"}
+    </Button>
+  ) : null;
 
   const rejectTrigger = (
     <Button variant="outline" size="lg" disabled={!canReview || pending}>
@@ -273,6 +308,16 @@ function VideoCard({
         </p>
       )}
 
+      {v.complianceOutdated ? (
+        <p className="flex gap-2 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-2 text-xs text-warning">
+          <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            This check was made against older ad texts. The page copy changed since: check the video
+            again before using it.
+          </span>
+        </p>
+      ) : null}
+
       {v.approval === "approved" && !v.onShopify ? (
         <p className="text-xs text-warning">
           The upload to the Shopify product did not finish. Approve it again to resume.
@@ -323,6 +368,7 @@ function VideoCard({
               </DisabledReason>
             )
           ) : null}
+          {recheckButton}
           <FormError message={error} />
         </div>
       ) : null}
@@ -398,23 +444,35 @@ function AddVideoForm({ onAdd }: { onAdd: (input: { url: string }) => Promise<Ac
   );
 }
 
+/** Parses a positive decimal ("0,92" accepted); null when invalid or empty. */
+function parseRate(value: string): number | null {
+  const n = Number.parseFloat(value.trim().replace(",", "."));
+  return Number.isFinite(n) && n > 0 && n <= 1_000_000 ? n : null;
+}
+
 function VideosPartApproval({
   videos,
   pagePart,
   canReview,
-  approverLabel,
+  canChooseAdAccount,
+  brandCurrency,
   adAccounts,
   onApproveVideos,
 }: VideoReviewProps) {
-  const usable = adAccounts.filter((a) => USABLE.has(a.status));
+  const usable = adAccounts.filter((a) => a.usable);
+  const unusable = adAccounts.filter((a) => !a.usable);
   const [accountId, setAccountId] = useState(usable.length === 1 ? usable[0]!.id : "");
+  const [fx, setFx] = useState("");
   const [note, setNote] = useState("");
   const ready = videos.filter((v) => v.approval === "approved" && v.onShopify);
   const uploading = videos.some((v) => v.approval === "approved" && !v.onShopify);
   const account = usable.find((a) => a.id === accountId) ?? null;
+  const needsFx = !!account?.needsFxRate;
+  const rate = needsFx ? parseRate(fx) : null;
+  const canApprove = canReview && canChooseAdAccount;
 
-  const blocker = !canReview
-    ? `Waiting for: ${approverLabel}. Your role can view but not approve.`
+  const blocker = !canApprove
+    ? "Waiting for: Media buyer or Owner. They choose the TikTok Ads account and approve the videos for the campaign."
     : ready.length === 0
       ? "Approve at least one video first."
       : uploading
@@ -423,7 +481,9 @@ function VideosPartApproval({
           ? "Connect a TikTok Ads account to this brand first."
           : !account
             ? "Choose the TikTok Ads account."
-            : null;
+            : needsFx && rate === null
+              ? `Enter the exchange rate from ${brandCurrency} to ${account.currency}.`
+              : null;
 
   const trigger = (
     <Button size="xl" disabled={blocker !== null}>
@@ -444,23 +504,53 @@ function VideosPartApproval({
           to prepare the campaign.
         </p>
       ) : (
-        <SelectField
-          id="videos-ad-account"
-          label="TikTok Ads account for the campaign"
-          value={accountId}
-          disabled={!canReview}
-          onChange={(e) => setAccountId(e.currentTarget.value)}
-          className="max-w-md"
-          hint={
-            usable.length < adAccounts.length
-              ? "Accounts that need to be reconnected cannot be chosen."
-              : "The campaign is created on this account, paused."
-          }
-          options={[
-            ...(usable.length === 1 ? [] : [{ value: "", label: "Choose an account" }]),
-            ...usable.map((a) => ({ value: a.id, label: `${a.name} (${a.advertiserId})` })),
-          ]}
-        />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField
+            id="videos-ad-account"
+            label="TikTok Ads account for the campaign"
+            value={accountId}
+            disabled={!canApprove}
+            onChange={(e) => {
+              setAccountId(e.currentTarget.value);
+              setFx("");
+            }}
+            className="max-w-md"
+            hint={
+              unusable.length > 0 ? (
+                <>
+                  Not available:{" "}
+                  {unusable
+                    .map((a) => `${a.name} (${a.unusableReason ?? "reconnect it"})`)
+                    .join("; ")}
+                  .
+                </>
+              ) : (
+                "The campaign is created on this account, paused."
+              )
+            }
+            options={[
+              ...(usable.length === 1 ? [] : [{ value: "", label: "Choose an account" }]),
+              ...usable.map((a) => ({
+                value: a.id,
+                label: `${a.name} (${a.advertiserId})${a.currency ? `, ${a.currency}` : ""}`,
+              })),
+            ]}
+          />
+          {needsFx && account ? (
+            <TextField
+              id="videos-fx-rate"
+              label={`Exchange rate: 1 ${brandCurrency} = ? ${account.currency}`}
+              inputMode="decimal"
+              placeholder="e.g. 0.92"
+              value={fx}
+              disabled={!canApprove}
+              onChange={(e) => setFx(e.currentTarget.value)}
+              suffix={account.currency ?? undefined}
+              hint={`This account bills in ${account.currency}, the brand sells in ${brandCurrency}. The test budget is converted with this rate and the rate is recorded with your approval.`}
+              error={fx.trim() !== "" && rate === null ? "Enter a number above zero." : undefined}
+            />
+          ) : null}
+        </div>
       )}
       <div className="flex flex-wrap items-center gap-3">
         {blocker ? (
@@ -472,7 +562,14 @@ function VideosPartApproval({
             description={
               <>
                 {ready.length} video{ready.length === 1 ? "" : "s"} will be used on{" "}
-                <strong className="text-foreground">{account?.name}</strong>.{" "}
+                <strong className="text-foreground">{account?.name}</strong>
+                {needsFx && rate !== null ? (
+                  <>
+                    {" "}
+                    (1 {brandCurrency} = {rate} {account?.currency})
+                  </>
+                ) : null}
+                .{" "}
                 {pagePart === "approved"
                   ? "Trendcart then prepares the campaign on TikTok Ads, paused. Nothing spends until someone approves the launch at Gate 4."
                   : "The page still needs its approval: the campaign is prepared, paused, once both parts are approved."}
@@ -481,7 +578,11 @@ function VideosPartApproval({
             confirmLabel="Approve videos"
             pendingLabel="Approving…"
             onConfirm={() =>
-              onApproveVideos({ adConnectionId: accountId, note: note.trim() || undefined })
+              onApproveVideos({
+                adConnectionId: accountId,
+                ...(needsFx && rate !== null ? { fxRate: rate } : {}),
+                note: note.trim() || undefined,
+              })
             }
           >
             <TextAreaField
@@ -494,7 +595,7 @@ function VideosPartApproval({
             />
           </ConfirmDialog>
         )}
-        {blocker && canReview ? <p className="text-sm text-muted-foreground">{blocker}</p> : null}
+        {blocker && canApprove ? <p className="text-sm text-muted-foreground">{blocker}</p> : null}
       </div>
     </div>
   );

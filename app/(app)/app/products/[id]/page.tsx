@@ -32,6 +32,7 @@ import {
 import {
   budgetCeiling,
   budgetLabel,
+  campaignCurrency,
   CampaignStats,
   CampaignStatusPill,
   CampaignSummary,
@@ -92,6 +93,7 @@ import {
   approveVideoAction,
   approveVideosAction,
   publishToProfileAction,
+  recheckVideoAction,
   refreshTikTokPostsAction,
   rejectVideoAction,
 } from "./video-actions";
@@ -340,6 +342,10 @@ async function ProductDetail({ params, searchParams }: Props) {
         <GateThree product={product} role={role} />
       ) : null}
 
+      {product.campaign?.spendingUnknown ? (
+        <SpendingUnknown product={product} campaign={product.campaign} role={role} />
+      ) : null}
+
       {product.status === "ready_to_launch" ? <GateFour product={product} role={role} /> : null}
 
       {product.status === "launched" && product.campaign ? (
@@ -365,7 +371,7 @@ async function ProductDetail({ params, searchParams }: Props) {
       (product.failedStep === "launch" || product.failedStep === "prepare_campaign") &&
       product.campaign ? (
         <Section id="campaign" title="Campaign" description="Nothing is spending.">
-          <CampaignSummary campaign={product.campaign} currency={product.currency} />
+          <CampaignSummary campaign={product.campaign} />
         </Section>
       ) : null}
 
@@ -747,6 +753,8 @@ function VideoLibrary({
       pagePart={product.contentParts.page}
       videosPart={product.contentParts.videos}
       canReview={can(role, "gate:content_approval") && can(role, "video:approve")}
+      canChooseAdAccount={product.canChooseAdAccount}
+      brandCurrency={product.currency}
       canPublish={can(role, "video:publish")}
       approverLabel={whoApproves("content_approval")}
       adAccounts={product.adAccounts}
@@ -757,6 +765,7 @@ function VideoLibrary({
       onApprove={approveVideoAction.bind(null, product.id)}
       onReject={rejectVideoAction.bind(null, product.id)}
       onAdd={addVideoAction.bind(null, product.id)}
+      onRecheck={recheckVideoAction.bind(null, product.id)}
       onApproveVideos={approveVideosAction.bind(null, product.id)}
       onPublish={publishToProfileAction}
     />
@@ -806,7 +815,7 @@ function GateFour({ product, role }: { product: ProductPipelineDTO; role: Role }
         </p>
       ) : (
         <div className="grid gap-5">
-          <CampaignSummary campaign={campaign} currency={product.currency} />
+          <CampaignSummary campaign={campaign} />
           {inFlight ? (
             <Notice tone="info" title="Launching on TikTok…">
               The launch was approved{" "}
@@ -834,8 +843,8 @@ function GateFour({ product, role }: { product: ProductPipelineDTO; role: Role }
             <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:flex-wrap sm:items-center">
               <LaunchCampaignButton
                 advertiser={advertiserOf(campaign)}
-                budget={budgetLabel(campaign.config, product.currency)}
-                ceiling={budgetCeiling(campaign.config, product.currency)}
+                budget={budgetLabel(campaign.config, campaignCurrency(campaign))}
+                ceiling={budgetCeiling(campaign.config, campaignCurrency(campaign))}
                 countries={counts.countries.join(", ")}
                 adGroups={counts.adGroups}
                 ads={counts.ads}
@@ -844,13 +853,17 @@ function GateFour({ product, role }: { product: ProductPipelineDTO; role: Role }
                 approverLabel={whoApproves("launch")}
                 onLaunch={launchCampaignAction.bind(null, product.id)}
               />
-              <ChangeBudgetButton
-                amount={campaign.config.budget.amount}
-                currency={product.currency}
-                levelLabel={budgetLevel(campaign)}
-                canChange={can(role, "campaign:budget")}
-                onChange={updateCampaignBudgetAction.bind(null, product.id)}
-              />
+              {campaign.budgetUpdatable ? (
+                <ChangeBudgetButton
+                  amount={campaign.config.budget.amount}
+                  currency={campaignCurrency(campaign)}
+                  min={campaign.minBudget}
+                  max={campaign.maxBudget}
+                  levelLabel={budgetLevel(campaign)}
+                  canChange={can(role, "campaign:budget")}
+                  onChange={updateCampaignBudgetAction.bind(null, product.id)}
+                />
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -898,10 +911,12 @@ function CampaignResults({
               onResume={resumeCampaignAction.bind(null, product.id)}
             />
           ) : null}
-          {live ? (
+          {live && campaign.budgetUpdatable ? (
             <ChangeBudgetButton
               amount={campaign.config.budget.amount}
-              currency={product.currency}
+              currency={campaignCurrency(campaign)}
+              min={campaign.minBudget}
+              max={campaign.maxBudget}
               levelLabel={budgetLevel(campaign)}
               canChange={can(role, "campaign:budget")}
               onChange={updateCampaignBudgetAction.bind(null, product.id)}
@@ -913,18 +928,55 @@ function CampaignResults({
       <div className="grid gap-6">
         <CampaignStats
           campaign={campaign}
-          currency={product.currency}
           syncedLabel={campaign.statsSyncedAt ? sinceNow(campaign.statsSyncedAt) : null}
         />
         <details className="rounded-xl border border-border">
           <summary className="cursor-pointer rounded-xl px-3 py-2 text-sm outline-none select-none hover:bg-surface-2 focus-visible:ring-3 focus-visible:ring-ring/50">
-            Campaign setup: {budgetLabel(campaign.config, product.currency)}
+            Campaign setup: {budgetLabel(campaign.config, campaignCurrency(campaign))}
           </summary>
           <div className="border-t border-border p-3">
-            <CampaignSummary campaign={campaign} currency={product.currency} />
+            <CampaignSummary campaign={campaign} />
           </div>
         </details>
       </div>
+    </Section>
+  );
+}
+
+/**
+ * A launch failed and pausing the campaign again failed too: Trendcart cannot
+ * tell whether it is spending. Shown above everything with the pause action.
+ */
+function SpendingUnknown({
+  product,
+  campaign,
+  role,
+}: {
+  product: ProductPipelineDTO;
+  campaign: CampaignDTO;
+  role: Role;
+}) {
+  return (
+    <Section
+      id="spending-unknown"
+      title="This campaign may be spending"
+      description={
+        <>
+          The launch on {advertiserOf(campaign)} failed and pausing it again failed too. Part of the
+          campaign may be live. Pause it now, or check it in TikTok Ads Manager.
+        </>
+      }
+      className="border-danger/50"
+      actions={<CampaignStatusPill status={campaign.status} />}
+    >
+      <PauseResumeButton
+        status="active"
+        advertiser={advertiserOf(campaign)}
+        canPause={can(role, "campaign:pause")}
+        canResume={false}
+        onPause={pauseCampaignAction.bind(null, product.id)}
+        onResume={resumeCampaignAction.bind(null, product.id)}
+      />
     </Section>
   );
 }

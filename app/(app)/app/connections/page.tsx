@@ -289,12 +289,24 @@ async function BrandConnections({ brand, role }: { brand: BrandDTO; role: Role }
                 key={c.id}
                 icon={<MegaphoneIcon aria-hidden="true" className="size-4" />}
                 title={c.name}
-                meta={<span className="font-mono">Advertiser {c.advertiserId}</span>}
+                meta={
+                  <>
+                    <span className="font-mono">Advertiser {c.advertiserId}</span>
+                    {" · "}
+                    {c.currency ? (
+                      <span>Billed in {c.currency}</span>
+                    ) : (
+                      <span className="text-warning">
+                        Currency unknown: reconnect before using it for a campaign
+                      </span>
+                    )}
+                  </>
+                }
                 health={c.health}
                 healthReason={c.healthReason}
                 actions={
                   <>
-                    {canCreate && c.health !== "green" ? (
+                    {canCreate && (c.health !== "green" || !c.currency) ? (
                       <ConnectLink href={`/api/tiktok/ads/connect?${q}`}>Reconnect</ConnectLink>
                     ) : null}
                     {canDelete && c.status !== "disconnected" ? (

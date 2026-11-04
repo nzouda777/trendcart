@@ -43,7 +43,15 @@ export function campaignCounts(spec: Spec) {
   return { adGroups, ads, countries };
 }
 
-/** "€20.00 per day per ad group" (from the spec, in the brand currency). */
+/**
+ * The currency every campaign amount is in: the ad account's (TikTok spends
+ * in it). Falls back to the brand currency for an account of unknown currency.
+ */
+export function campaignCurrency(campaign: CampaignDTO): string {
+  return campaign.currency ?? campaign.brandCurrency;
+}
+
+/** "€20.00 per day per ad group" (from the spec, in the ad account currency). */
 export function budgetLabel(spec: Spec, currency: string): string {
   const per = spec.budget.mode === "daily" ? " per day" : " in total";
   const level = spec.budget.level === "ad_group" ? " per ad group" : "";
@@ -61,14 +69,9 @@ export function budgetCeiling(spec: Spec, currency: string): string {
  * Campaign → ad groups → ads, with the budget, targeting and ad texts. Every
  * entity shows the campaign's state (paused until GATE 4).
  */
-export function CampaignSummary({
-  campaign,
-  currency,
-}: {
-  campaign: CampaignDTO;
-  currency: string;
-}) {
+export function CampaignSummary({ campaign }: { campaign: CampaignDTO }) {
   const spec = campaign.config;
+  const currency = campaignCurrency(campaign);
   const { adGroups, ads, countries } = campaignCounts(spec);
   const entityStatus: CampaignStatus = campaign.status === "active" ? "active" : "paused";
   return (
@@ -97,8 +100,12 @@ export function CampaignSummary({
         ]}
       />
       <p className="text-xs text-muted-foreground">
-        Amounts are shown in {currency}, the brand currency. TikTok charges in the ad
-        account&rsquo;s currency.
+        {campaign.currency
+          ? `Amounts are in ${campaign.currency}, the currency the ad account is billed in.`
+          : `Amounts are shown in ${currency}, the brand currency: the ad account's currency is unknown. Reconnect it to confirm.`}
+        {campaign.fxRate !== null
+          ? ` Rate recorded at Gate 3: 1 ${campaign.brandCurrency} = ${campaign.fxRate} ${currency}.`
+          : ""}
       </p>
 
       <div className="grid gap-2">
@@ -178,15 +185,15 @@ function hourLabel(iso: string) {
  */
 export function CampaignStats({
   campaign,
-  currency,
   syncedLabel,
 }: {
   campaign: CampaignDTO;
-  currency: string;
   /** "3 minutes ago", computed on the server. */
   syncedLabel: string | null;
 }) {
   const { totals, stats } = campaign;
+  const currency = campaignCurrency(campaign);
+  const inBrand = campaign.totalsInBrandCurrency;
   const money = (n: number) => formatMoney(n, currency);
   const synced = campaign.statsSyncedAt ? (
     <p className="text-xs text-muted-foreground">
@@ -225,6 +232,13 @@ export function CampaignStats({
         <Tile label="Revenue" value={money(totals.revenue)} />
         <Tile label="ROAS" value={totals.roas === null ? "—" : `${totals.roas.toFixed(2)}×`} />
       </dl>
+      {inBrand ? (
+        <p className="text-xs text-muted-foreground">
+          In {campaign.brandCurrency}, at the rate recorded at Gate 3 (approximate): spend{" "}
+          {formatMoney(inBrand.spend, campaign.brandCurrency)}, revenue{" "}
+          {formatMoney(inBrand.revenue, campaign.brandCurrency)}.
+        </p>
+      ) : null}
 
       <figure className="grid gap-2">
         <figcaption className="text-sm font-medium">

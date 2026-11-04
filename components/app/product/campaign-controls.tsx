@@ -188,12 +188,18 @@ function budgetUnavailable(failure: ServiceFailure) {
 export function ChangeBudgetButton({
   amount,
   currency,
+  min = null,
+  max,
   levelLabel,
   canChange,
   onChange,
 }: {
   amount: number;
   currency: string;
+  /** TikTok's daily minimum for this level, when known. */
+  min?: number | null;
+  /** Highest amount the service accepts. */
+  max?: number;
   /** "per day per ad group". */
   levelLabel: string;
   canChange: boolean;
@@ -202,7 +208,16 @@ export function ChangeBudgetButton({
   const uid = useId();
   const [value, setValue] = useState(String(amount));
   const parsed = Number.parseFloat(value.replace(",", "."));
-  const valid = Number.isFinite(parsed) && parsed > 0;
+  const rangeError = !Number.isFinite(parsed)
+    ? "Enter a budget above zero."
+    : parsed <= 0
+      ? "Enter a budget above zero."
+      : min !== null && parsed < min
+        ? `TikTok's minimum is ${min} ${currency}.`
+        : max !== undefined && parsed > max
+          ? `The highest budget allowed is ${max} ${currency}.`
+          : null;
+  const valid = rangeError === null;
   const trigger = (
     <Button variant="outline" size="lg" disabled={!canChange}>
       <WalletIcon aria-hidden="true" />
@@ -226,12 +241,18 @@ export function ChangeBudgetButton({
         label="Budget"
         type="number"
         inputMode="decimal"
-        min={1}
+        min={min ?? 0.01}
+        {...(max !== undefined ? { max } : {})}
         step="0.01"
         value={value}
         onChange={(e) => setValue(e.currentTarget.value)}
         suffix={currency}
-        error={value !== "" && !valid ? "Enter a budget above zero." : undefined}
+        hint={
+          min !== null || max !== undefined
+            ? `In ${currency}${min !== null ? `, at least ${min}` : ""}${max !== undefined ? `, at most ${max}` : ""}.`
+            : undefined
+        }
+        error={value !== "" && !valid ? (rangeError ?? undefined) : undefined}
       />
     </ConfirmDialog>
   );

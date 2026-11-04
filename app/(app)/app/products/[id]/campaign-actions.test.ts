@@ -49,13 +49,41 @@ describe("launchCampaignAction", () => {
     expect(refresh).toHaveBeenCalledOnce();
   });
 
-  it("explains a TikTok failure (campaign paused again) and refreshes to show it", async () => {
+  it("keeps the failed-launch message (paused again) and refreshes to show it", async () => {
+    const message =
+      "The launch failed (Advertiser balance too low.). The campaign was paused again: nothing is spending. Retry, then approve the launch again.";
+    services.launchCampaign.mockRejectedValue(
+      new ServiceError("invalid_state", message, { reason: "launch_failed_paused" }),
+    );
+    const result = await launchCampaignAction("p1", {});
+    expect(result).toMatchObject({
+      ok: false,
+      code: "invalid_state",
+      reason: "launch_failed_paused",
+      error: message,
+    });
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("never says nothing is spending when the re-pause failed", async () => {
+    const message =
+      "The launch failed, and Trendcart could not pause the campaign again: part of it may be spending. Pause it now (Pause campaign) or in TikTok Ads Manager.";
+    services.launchCampaign.mockRejectedValue(
+      new ServiceError("invalid_state", message, { reason: "launch_failed_not_paused" }),
+    );
+    const result = await launchCampaignAction("p1", {});
+    expect(result).toMatchObject({ ok: false, reason: "launch_failed_not_paused" });
+    expect(!result.ok && result.error).not.toMatch(/nothing is spending/);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("explains a raw TikTok failure without claiming nothing is spending", async () => {
     services.launchCampaign.mockRejectedValue(
       new IntegrationError("tiktok_ads", "permission_denied", "Advertiser balance too low."),
     );
     const result = await launchCampaignAction("p1", {});
     expect(result).toMatchObject({ ok: false, code: "integration" });
-    expect(!result.ok && result.error).toMatch(/paused again; nothing is spending/);
+    expect(!result.ok && result.error).toMatch(/Check the campaign state/);
     expect(refresh).toHaveBeenCalledOnce();
   });
 
@@ -129,5 +157,15 @@ describe("updateCampaignBudgetAction", () => {
     });
     expect(!result.ok && result.error).toMatch(/TikTok Ads Manager/);
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("keeps other precondition messages (cap, launch in flight) and does not mark them", async () => {
+    const message = "The daily budget cannot be above 300 USD.";
+    services.updateCampaignBudget.mockRejectedValue(
+      new ServiceError("precondition_failed", message),
+    );
+    const result = await updateCampaignBudgetAction("p1", { amount: 301 });
+    expect(result).toMatchObject({ ok: false, code: "precondition_failed", error: message });
+    expect(!result.ok && result.fieldErrors?.amount).toBeFalsy();
   });
 });

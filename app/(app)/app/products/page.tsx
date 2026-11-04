@@ -7,7 +7,7 @@ import { EmptyState, PageHeader } from "@/components/app-shell";
 import { ProductStatusBadge } from "@/components/app/badges";
 import { selectClass } from "@/components/app/form-controls";
 import { formatDate, formatMoney, hostOf } from "@/components/app/format";
-import { GATE_META } from "@/components/app/product-status";
+import { GATE_META, STEP_LABELS } from "@/components/app/product-status";
 import { ProductThumb } from "@/components/app/product-thumb";
 import { ListSkeleton, PageSkeleton } from "@/components/app/surface";
 import { Button } from "@/components/ui/button";
@@ -255,8 +255,13 @@ async function ProductList({
                 <span className="hidden text-right text-sm tabular-nums md:block">
                   {p.sellingPrice !== null && b ? formatMoney(p.sellingPrice, b.currency) : null}
                 </span>
-                <span className="shrink-0">
+                <span className="grid shrink-0 justify-items-end gap-0.5">
                   <ProductStatusBadge status={p.status} />
+                  {p.status === "failed" && p.failedStep ? (
+                    <span className="text-xs text-danger">
+                      {STEP_LABELS[p.failedStep] ?? p.failedStep}
+                    </span>
+                  ) : null}
                 </span>
                 <ChevronRightIcon
                   aria-hidden="true"

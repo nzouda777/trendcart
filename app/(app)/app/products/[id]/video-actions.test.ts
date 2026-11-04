@@ -23,6 +23,7 @@ const services = vi.hoisted(() => ({
   approveVideo: vi.fn(),
   approveVideos: vi.fn(),
   publishToProfile: vi.fn(),
+  recheckVideo: vi.fn(),
   refreshTikTokPosts: vi.fn(),
   rejectVideo: vi.fn(),
 }));
@@ -33,6 +34,7 @@ const {
   approveVideoAction,
   approveVideosAction,
   publishToProfileAction,
+  recheckVideoAction,
   refreshTikTokPostsAction,
   rejectVideoAction,
 } = await import("./video-actions");
@@ -150,6 +152,33 @@ describe("approveVideosAction", () => {
     );
   });
 
+  it("passes the exchange rate when the currencies differ", async () => {
+    services.approveVideos.mockResolvedValue({});
+    await approveVideosAction("p1", { adConnectionId: "ad1", fxRate: 0.92 });
+    expect(services.approveVideos).toHaveBeenCalledWith(
+      {},
+      { productId: "p1", adConnectionId: "ad1", fxRate: 0.92, note: undefined },
+    );
+  });
+
+  it("refuses a rate that is not above zero before calling the service", async () => {
+    expect(await approveVideosAction("p1", { adConnectionId: "ad1", fxRate: 0 })).toMatchObject({
+      ok: false,
+      code: "invalid_input",
+      fieldErrors: { fxRate: [expect.any(String)] },
+    });
+    expect(services.approveVideos).not.toHaveBeenCalled();
+  });
+
+  it("explains that only a media buyer or the owner chooses the ad account", async () => {
+    services.approveVideos.mockRejectedValue(new ForbiddenError());
+    expect(await approveVideosAction("p1", { adConnectionId: "ad1" })).toMatchObject({
+      ok: false,
+      code: "forbidden",
+      error: expect.stringMatching(/Media buyer or the Owner/),
+    });
+  });
+
   it("keeps the precondition message (no approved video, no account)", async () => {
     services.approveVideos.mockRejectedValue(
       new ServiceError("precondition_failed", "Approve at least one video first."),
@@ -160,6 +189,23 @@ describe("approveVideosAction", () => {
       error: "Approve at least one video first.",
     });
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("recheckVideoAction", () => {
+  it("re-runs the check of one video and refreshes", async () => {
+    services.recheckVideo.mockResolvedValue({});
+    expect(await recheckVideoAction("p1", "v1")).toEqual({ ok: true, data: undefined });
+    expect(services.recheckVideo).toHaveBeenCalledWith({}, { productId: "p1", videoId: "v1" });
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("explains a rate limit", async () => {
+    services.recheckVideo.mockRejectedValue(new ServiceError("rate_limited", "limit"));
+    expect(await recheckVideoAction("p1", "v1")).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/paid checks/),
+    });
   });
 });
 
