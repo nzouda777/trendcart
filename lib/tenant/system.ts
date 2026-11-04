@@ -1,9 +1,9 @@
 import "server-only";
 
-import { and, asc, eq, isNotNull, isNull, lt, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
-import { shopifyConnection, tiktokProfileConnection } from "@/lib/db/schema";
+import { campaign, shopifyConnection, tiktokProfileConnection } from "@/lib/db/schema";
 import type { Database } from "@/lib/db/types";
 
 import { createSystemContext, type WorkspaceContext } from "./context";
@@ -71,5 +71,36 @@ export async function listDueTikTokProfileConnections(
       ),
     )
     .orderBy(asc(t.expiresAt), asc(t.id))
+    .limit(limit);
+}
+
+export type WorkspaceCampaignRef = { workspaceId: string; campaignId: string };
+
+/** How long a launched campaign that was paused keeps being synced (late stats). */
+export const PAUSED_CAMPAIGN_SYNC_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Launched campaigns to sync hourly stats for, across workspaces (ids only):
+ * every `active` campaign, plus `paused` ones that were launched and changed
+ * within the last 48 hours, so their final hours land. Oldest first.
+ */
+export async function listLaunchedCampaigns(
+  input: { limit: number; now?: Date },
+  db: Database = getDb(),
+): Promise<WorkspaceCampaignRef[]> {
+  const limit = Math.max(0, Math.min(Math.trunc(input.limit), 1000));
+  if (limit === 0) return [];
+  const since = new Date((input.now ?? new Date()).getTime() - PAUSED_CAMPAIGN_SYNC_MS);
+  const c = campaign;
+  return db
+    .select({ workspaceId: c.workspaceId, campaignId: c.id })
+    .from(c)
+    .where(
+      and(
+        isNotNull(c.launchedAt),
+        or(eq(c.status, "active"), and(eq(c.status, "paused"), gt(c.updatedAt, since))),
+      ),
+    )
+    .orderBy(asc(c.launchedAt), asc(c.id))
     .limit(limit);
 }

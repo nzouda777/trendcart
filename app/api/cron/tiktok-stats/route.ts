@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { getIntegrations } from "@/lib/integrations";
-import { syncAllCampaignStats, type CampaignScanner } from "@/lib/services/internal/campaign-stats";
-import * as tenantSystem from "@/lib/tenant/system";
+import { syncAllCampaignStats } from "@/lib/services/internal/campaign-stats";
+import { getSystemContext, listLaunchedCampaigns } from "@/lib/tenant/system";
 
 import { isAuthorizedCron } from "../tiktok-token-refresh/refresh";
 
@@ -11,22 +11,16 @@ import { isAuthorizedCron } from "../tiktok-token-refresh/refresh";
  * `Authorization: Bearer $CRON_SECRET`; refuses everything when unset.
  * Syncs campaign_stats_hourly for launched campaigns, one system context per
  * workspace.
- *
- * The cross-workspace scan of launched campaigns (ids only) belongs to the
- * foundation layer (`listLaunchedCampaigns` in lib/tenant/system). Until it
- * exists, the route answers 503 "not_configured" instead of guessing.
+ * The cross-workspace scan (ids only) is `listLaunchedCampaigns`.
  */
 export async function GET(request: Request) {
   if (!isAuthorizedCron(request.headers.get("authorization"), process.env.CRON_SECRET)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const scan = (tenantSystem as unknown as { listLaunchedCampaigns?: CampaignScanner })
-    .listLaunchedCampaigns;
-  if (!scan) return NextResponse.json({ error: "not_configured" }, { status: 503 });
   const summary = await syncAllCampaignStats({
-    scan,
+    scan: (input, db) => listLaunchedCampaigns(input, db),
     ads: getIntegrations().tiktokAds,
-    context: (workspaceId) => tenantSystem.getSystemContext(workspaceId, "cron:tiktok-stats"),
+    context: (workspaceId) => getSystemContext(workspaceId, "cron:tiktok-stats"),
   });
   return NextResponse.json(summary);
 }

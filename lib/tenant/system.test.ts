@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { requireRole } from "@/lib/auth/guards";
-import { brand, member, shopifyConnection, tiktokProfileConnection } from "@/lib/db/schema";
+import {
+  brand,
+  campaign,
+  member,
+  product,
+  shopifyConnection,
+  tiktokAdConnection,
+  tiktokProfileConnection,
+} from "@/lib/db/schema";
 import { createTestDb, insertUser, insertWorkspace } from "@/lib/db/testing";
 import type { Database } from "@/lib/db/types";
 
@@ -12,6 +20,7 @@ import {
   findShopifyConnectionsByShopDomain,
   getSystemContext,
   listDueTikTokProfileConnections,
+  listLaunchedCampaigns,
 } from "./system";
 
 let db: Database;
@@ -170,5 +179,65 @@ describe("listWorkspaceMembers", () => {
       [viewer, "viewer"],
     ]);
     expect(members[0]).toMatchObject({ name: "Olivia Owner", email: expect.any(String) });
+  });
+});
+
+describe("listLaunchedCampaigns", () => {
+  async function campaignIn(
+    ws: string,
+    values: {
+      status: "draft" | "creating" | "paused" | "active" | "failed";
+      launchedAt?: Date;
+      updatedAt?: Date;
+    },
+  ) {
+    const s = createScopedDb(db, ws);
+    const brandId = await brandIn(ws);
+    const p = await s.insert(product, {
+      brandId,
+      sourceType: "tiktok_video",
+      sourceUrl: "https://www.tiktok.com/@a/video/1234567890123456789",
+    });
+    const ad = await s.insert(tiktokAdConnection, {
+      brandId,
+      advertiserId: `adv-${crypto.randomUUID()}`,
+      name: "Ads",
+    });
+    return (
+      await s.insert(campaign, {
+        productId: p.id,
+        adConnectionId: ad.id,
+        config: {} as never,
+        ...values,
+      })
+    ).id;
+  }
+
+  it("returns active and recently paused launched campaigns across workspaces, ids only", async () => {
+    const active = await campaignIn(wsA, {
+      status: "active",
+      launchedAt: new Date(now.getTime() - 5 * HOUR),
+    });
+    const recentPaused = await campaignIn(wsB, {
+      status: "paused",
+      launchedAt: new Date(now.getTime() - 10 * HOUR),
+      updatedAt: new Date(now.getTime() - 2 * HOUR),
+    });
+    await campaignIn(wsA, {
+      status: "paused",
+      launchedAt: new Date(now.getTime() - 100 * HOUR),
+      updatedAt: new Date(now.getTime() - 72 * HOUR),
+    });
+    await campaignIn(wsA, { status: "paused" }); // never launched
+    await campaignIn(wsB, { status: "draft" });
+
+    const refs = await listLaunchedCampaigns({ limit: 50, now }, db);
+    expect(refs).toEqual([
+      { workspaceId: wsB, campaignId: recentPaused },
+      { workspaceId: wsA, campaignId: active },
+    ]);
+    for (const ref of refs) expect(Object.keys(ref).sort()).toEqual(["campaignId", "workspaceId"]);
+    expect(await listLaunchedCampaigns({ limit: 1, now }, db)).toHaveLength(1);
+    expect(await listLaunchedCampaigns({ limit: 0, now }, db)).toEqual([]);
   });
 });
