@@ -2,6 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     { "path": "/api/cron/tiktok-token-refresh", "schedule": "15 3 * * *" },
-    { "path": "/api/cron/tiktok-stats", "schedule": "5 * * * *" }
+    { "path": "/api/cron/tiktok-stats", "schedule": "15 3 * * *" }
   ]
 }
