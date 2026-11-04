@@ -47,3 +47,7 @@ next-env.d.ts
 # allow the env template
 !.env.example
 /.swc
+
+.vercel
+.env*
+!.env.example
