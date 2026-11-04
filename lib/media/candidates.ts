@@ -78,3 +78,46 @@ export async function resolveFreshMedia(
 ): Promise<ResolvedTikTokVideo> {
   return provider.resolveVideo(ctx, tiktokUrl);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Related videos (build step, GATE 3 videos part)                            */
+/* -------------------------------------------------------------------------- */
+
+/** Related videos kept per product search (bounded fan-out for compliance checks). */
+export const MAX_RELATED_VIDEOS = 6;
+
+const MAX_QUERY_LENGTH = 100;
+
+/**
+ * Search query for videos of the same product: the first analysis keyword
+ * (the most specific one), else the product name. Null when neither is usable.
+ */
+export function relatedVideoQuery(
+  analysis: { keywords: string[]; productName: string } | null | undefined,
+): string | null {
+  if (!analysis) return null;
+  const pick = [...analysis.keywords, analysis.productName]
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .find((s) => s.length > 0);
+  return pick ? pick.slice(0, MAX_QUERY_LENGTH) : null;
+}
+
+/**
+ * Candidates worth storing: unique TikTok URLs, not already stored for the
+ * product, at most `limit`, in the provider's order (its ranking).
+ */
+export function newCandidates(
+  found: readonly VideoCandidate[],
+  storedUrls: ReadonlySet<string>,
+  limit = MAX_RELATED_VIDEOS,
+): VideoCandidate[] {
+  const seen = new Set(storedUrls);
+  const out: VideoCandidate[] = [];
+  for (const candidate of found) {
+    if (out.length >= limit) break;
+    if (seen.has(candidate.tiktokUrl)) continue;
+    seen.add(candidate.tiktokUrl);
+    out.push(candidate);
+  }
+  return out;
+}

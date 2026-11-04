@@ -18,11 +18,12 @@
  *    then createDraftProduct with idempotencyKey = product id (Shopify upserts
  *    on the `trendcart.product_id` custom ID), then shopify_product is
  *    upserted on (product, connection). Re-runs update the same draft.
- * 3. Videos (M3) plug in here: gather related videos and run compliance
- *    checks, each idempotent on (product, tiktok_url). Not in M2.
+ * 3. Videos (./videos.ts): gather related videos and run compliance checks
+ *    (bounded fan-out), each idempotent on (product, tiktok_url).
  *
  * Every Shopify call is idempotent and the whole step stays well under the
- * function limit (one AI call, three Admin API calls).
+ * function limit (one copy call, three Admin API calls, at most
+ * MAX_CHECKS_PER_RUN compliance checks, CHECK_CONCURRENCY at a time).
  */
 import { and, eq } from "drizzle-orm";
 
@@ -57,6 +58,7 @@ import { decisionOrder, loadSupplierChoice, type SupplierChoicePayload } from ".
 import { draftTemplateSuffix, resolvePageTemplate, templateLabel } from "../page-template";
 import { isUnsafeText, pageImageUrls, safeVariantGroups, variantsFromListing } from "../page-input";
 import type { SupplierDetails } from "./source";
+import { buildVideos } from "./videos";
 
 import type { StepDefinition, StepEnv } from "./types";
 
@@ -431,6 +433,7 @@ export const buildStep: StepDefinition = {
     }
 
     await syncShopifyDraft(ctx, integrations, current, { choice, supplier, copy });
+    await buildVideos(env, current, copy);
     return {};
   },
 };

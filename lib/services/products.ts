@@ -14,7 +14,17 @@ import {
   stepForStatus,
   type ApprovalEvidence,
 } from "@/lib/domain/state-machine";
-import { approval, brand, campaign, job, product, shopifyProduct, video } from "@/lib/db/schema";
+import {
+  approval,
+  brand,
+  campaign,
+  job,
+  product,
+  shopifyProduct,
+  tiktokPost,
+  tiktokProfileConnection,
+  video,
+} from "@/lib/db/schema";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row } from "@/lib/tenant/scoped-db";
 import { LEASE_TTL_MS } from "@/lib/workflows/concurrency";
@@ -33,6 +43,7 @@ import type {
   ProductDetailDTO,
   ProductListDTO,
   ProductListItemDTO,
+  TikTokPostDTO,
   VideoDTO,
 } from "./types";
 
@@ -121,7 +132,24 @@ function toApprovalDTO(r: Row<typeof approval>): ApprovalDTO {
   };
 }
 
-function toVideoDTO(r: Row<typeof video>): VideoDTO {
+export function toPostDTO(
+  r: Row<typeof tiktokPost>,
+  profileName: string | null,
+): TikTokPostDTO {
+  return {
+    id: r.id,
+    videoId: r.videoId,
+    profileConnectionId: r.profileConnectionId,
+    profileName,
+    status: r.status,
+    error: r.error,
+    createdAt: iso(r.createdAt),
+    updatedAt: iso(r.updatedAt),
+  };
+}
+
+function toVideoDTO(r: Row<typeof video>, posts: TikTokPostDTO[] = []): VideoDTO {
+  const checkError = (r.metadata as { checkError?: unknown } | null)?.checkError;
   return {
     id: r.id,
     tiktokUrl: r.tiktokUrl,
@@ -134,7 +162,38 @@ function toVideoDTO(r: Row<typeof video>): VideoDTO {
     shopifyFileUrl: r.shopifyFileUrl,
     hasSparkCode: !!r.sparkCodeEnc,
     createdAt: iso(r.createdAt),
+    onShopify: !!r.shopifyMediaId && !!r.shopifyFileUrl,
+    tiktokVideoIds: r.tiktokVideoIds ?? {},
+    checkError: typeof checkError === "string" ? checkError : null,
+    posts,
   };
+}
+
+/** Posts of these videos, newest first, grouped by video id. */
+async function postsByVideo(
+  ctx: WorkspaceContext,
+  videos: Row<typeof video>[],
+): Promise<Map<string, TikTokPostDTO[]>> {
+  const out = new Map<string, TikTokPostDTO[]>();
+  if (videos.length === 0) return out;
+  const posts = await ctx.db.select(tiktokPost, {
+    where: inArray(
+      tiktokPost.videoId,
+      videos.map((v) => v.id),
+    ),
+    orderBy: (t) => desc(t.createdAt),
+  });
+  if (posts.length === 0) return out;
+  const profiles = await ctx.db.select(tiktokProfileConnection, {
+    where: inArray(tiktokProfileConnection.id, [...new Set(posts.map((p) => p.profileConnectionId))]),
+  });
+  const names = new Map(profiles.map((p) => [p.id, p.displayName]));
+  for (const p of posts) {
+    const list = out.get(p.videoId) ?? [];
+    list.push(toPostDTO(p, names.get(p.profileConnectionId) ?? null));
+    out.set(p.videoId, list);
+  }
+  return out;
 }
 
 function thumbnailOf(videos: Row<typeof video>[]): string | null {
@@ -155,6 +214,7 @@ export async function loadDetail(
     }),
     ctx.db.select(video, { where: eq(video.productId, row.id), orderBy: (t) => t.createdAt }),
   ]);
+  const posts = await postsByVideo(ctx, videos);
   const failedStep = row.status === "failed" ? await latestFailedStep(ctx.db, row.id) : null;
   const failedJob = failedStep
     ? jobs.find((j) => j.step === failedStep && j.status === "failed")
@@ -168,7 +228,7 @@ export async function loadDetail(
     error: failedJob?.error ?? null,
     jobs: jobs.map(toJobDTO),
     approvals: approvals.map(toApprovalDTO),
-    videos: videos.map(toVideoDTO),
+    videos: videos.map((v) => toVideoDTO(v, posts.get(v.id) ?? [])),
   };
 }
 

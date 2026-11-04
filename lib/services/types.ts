@@ -4,6 +4,8 @@
  * Safe to import from client components.
  */
 import type {
+  CampaignIds,
+  CampaignSpec,
   ComplianceReport,
   Gate,
   PageCopy,
@@ -141,6 +143,26 @@ export type VideoDTO = {
   shopifyFileUrl: string | null;
   hasSparkCode: boolean;
   createdAt: ISODate;
+  /** Uploaded to the Shopify product (approved videos). */
+  onShopify: boolean;
+  /** TikTok Ads video id per advertiser id, once uploaded for a campaign. */
+  tiktokVideoIds: Record<string, string>;
+  /** Why the compliance check could not run (video gone, refused), else null. */
+  checkError: string | null;
+  /** Posts of this video to TikTok profiles (newest first). */
+  posts: TikTokPostDTO[];
+};
+
+export type TikTokPostDTO = {
+  id: string;
+  videoId: string;
+  profileConnectionId: string;
+  /** Profile display name (null if the connection was removed). */
+  profileName: string | null;
+  status: "pending" | "processing" | "published" | "failed";
+  error: string | null;
+  createdAt: ISODate;
+  updatedAt: ISODate;
 };
 
 export type ProductListItemDTO = {
@@ -297,6 +319,77 @@ export type ProductPipelineDTO = ProductDetailDTO & {
    * can offer "retry approval".
    */
   pagePublishClaim: { startedAt: ISODate; stale: boolean } | null;
+  /**
+   * GATE 3 videos part in force: the videos the campaign uses and the TikTok
+   * Ads account it is prepared on (null until the videos part is approved).
+   */
+  videosChoice: { approvalId: string; videoIds: string[]; adConnectionId: string } | null;
+  /** The brand's TikTok Ads accounts (GATE 3 videos part picker). */
+  adAccounts: TikTokAdAccountOptionDTO[];
+  /** The brand's TikTok profiles (publish an approved video). */
+  tiktokProfiles: TikTokProfileOptionDTO[];
+  /** The paused / launched campaign (after prepare_campaign), else null. */
+  campaign: CampaignDTO | null;
+  /**
+   * The GATE 4 launch in flight (approval recorded, TikTok call running),
+   * else null. `stale` after 5 minutes: launchCampaign can be approved again.
+   */
+  launchClaim: { startedAt: ISODate; stale: boolean } | null;
+  /** Whether the posting app is audited (else posts are private: SELF_ONLY). */
+  postingAudited: boolean;
+};
+
+/* Campaigns (M3: GATE 4, launch, stats) ------------------------------------ */
+
+export type CampaignStatus = "draft" | "creating" | "paused" | "active" | "failed";
+
+export type CampaignStatDTO = {
+  /** Start of the hour, UTC. */
+  hour: ISODate;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+};
+
+export type CampaignTotalsDTO = Omit<CampaignStatDTO, "hour"> & {
+  /** revenue / spend, null without spend. */
+  roas: number | null;
+  /** clicks / impressions, null without impressions. */
+  ctr: number | null;
+};
+
+export type CampaignDTO = {
+  id: string;
+  adConnectionId: string;
+  advertiserId: string | null;
+  advertiserName: string | null;
+  /** "paused" before launch (and after a pause), "active" once launched. */
+  status: CampaignStatus;
+  /** The spec sent to TikTok (budget, targeting, ads). */
+  config: CampaignSpec;
+  tiktokIds: CampaignIds | null;
+  launchedAt: ISODate | null;
+  /** Hourly stats, oldest first (last 72 hours). */
+  stats: CampaignStatDTO[];
+  totals: CampaignTotalsDTO;
+  /** Last synced hour (null before the first sync). */
+  statsSyncedAt: ISODate | null;
+};
+
+export type TikTokAdAccountOptionDTO = {
+  id: string;
+  advertiserId: string;
+  name: string;
+  status: ConnectionStatus;
+};
+
+export type TikTokProfileOptionDTO = {
+  id: string;
+  displayName: string;
+  status: ConnectionStatus;
+  postingMode: "direct" | "inbox";
 };
 
 export type ShopifyTemplatesDTO = {

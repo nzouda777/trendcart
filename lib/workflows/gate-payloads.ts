@@ -7,7 +7,11 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Gate } from "@/lib/domain/contracts";
-import { gatePartSchema, type GatePart } from "@/lib/domain/state-machine";
+import {
+  gatePartSchema,
+  type ApprovalEvidence,
+  type GatePart,
+} from "@/lib/domain/state-machine";
 import { approval, product } from "@/lib/db/schema";
 import type { NewRow, Row, ScopedDb } from "@/lib/tenant/scoped-db";
 
@@ -137,6 +141,51 @@ export async function loadSupplierChoice(
   if (!row || row.decision !== "approved") return null;
   const parsed = supplierChoicePayloadSchema.safeParse(row.payload);
   return parsed.success ? { ...parsed.data, approvalId: row.id } : null;
+}
+
+/**
+ * GATE 3 videos part approval: the videos the campaign will use (approved
+ * one by one before, each already uploaded to the Shopify product) and the
+ * TikTok Ads account the paused campaign is prepared on.
+ */
+export const videosPartPayloadSchema = z
+  .object({
+    part: z.literal("videos"),
+    kind: z.literal("approve"),
+    videoIds: z.array(z.string().min(1)).min(1).max(20),
+    adConnectionId: z.string().min(1),
+  })
+  .passthrough();
+export type VideosPartPayload = z.infer<typeof videosPartPayloadSchema>;
+
+/** The GATE 3 videos part approval in force (latest decision on that part), or null. */
+export async function loadVideosChoice(
+  db: ScopedDb,
+  productId: string,
+): Promise<(VideosPartPayload & { approvalId: string }) | null> {
+  const rows = await db.select(approval, {
+    where: and(eq(approval.productId, productId), eq(approval.gate, "content_approval")),
+    orderBy: decisionOrder,
+  });
+  const latest = rows.find((r) => r.payload?.part === "videos" && !isVoided(r));
+  if (!latest || latest.decision !== "approved") return null;
+  const parsed = videosPartPayloadSchema.safeParse(latest.payload);
+  return parsed.success ? { ...parsed.data, approvalId: latest.id } : null;
+}
+
+/** The recorded approval as the state machine wants it (gate transitions). */
+export function evidenceOf(
+  recorded: ApprovalRow,
+  parts?: readonly GatePart[],
+): ApprovalEvidence {
+  return {
+    id: recorded.id,
+    productId: recorded.productId,
+    gate: recorded.gate,
+    decision: recorded.decision,
+    userId: recorded.userId,
+    ...(parts ? { parts } : {}),
+  };
 }
 
 /** "publishing": a page approval is claimed and its Shopify publish is in flight. */

@@ -1,12 +1,15 @@
 /**
  * Keyword screen of caption and claims against TikTok ad policy categories
  * (pure, deterministic). The mock checker uses it as its "policy model"; the
- * live checker (M2) will run it as a fast pre-filter before the LLM check, so
- * an obvious violation never depends on a model call.
+ * live checker runs it next to the LLM review and keeps the worst verdict per
+ * rule, so an obvious violation never depends on a model call.
  *
- * Categories follow TikTok Advertising Policies: prohibited products,
- * restricted products, health/medical claims, misleading or exaggerated
- * claims, pricing claims, intellectual property, personal attributes.
+ * Categories follow TikTok Advertising Policies (ads.tiktok.com/help, checked
+ * 2026-11-04): Dangerous Products or Services, Adult Content, Healthcare and
+ * Pharmaceuticals, Weight Management and Body Image, Misleading and false
+ * content (exaggerated results, before-and-after comparisons, inconsistent
+ * prices), Intellectual Property Infringement, Discrimination/Harassment.
+ * The full brief the LLM review uses is in ./policy-brief.ts.
  */
 import type { ComplianceVerdict } from "@/lib/domain/contracts";
 
@@ -28,7 +31,9 @@ export const POLICY_RULES: PolicyRule[] = [
     verdict: "fail",
     matchCategory: true,
     patterns: [
-      /\b(gun|firearm|ammo|ammunition|weapon|taser|stun gun|pepper spray|switchblade)s?\b/i,
+      // "massage gun", "glue gun", "water gun"... are ordinary products, not weapons.
+      /\b(?<!\b(?:massage|glue|heat|nail|spray|staple|tattoo|caulk(?:ing)?|grease|water|toy|bubble|lint|label|price|paint|foam|air|tape|soldering|cleaning|percussion|fascia|muscle)[ -])(gun|firearm|ammo|ammunition|weapon|taser|stun gun|pepper spray|switchblade)s?\b/i,
+      /\b(fireworks?|explosives?|nunchucks?|brass knuckles|bb guns?|paintball guns?|handcuffs)\b/i,
       /\b(vape|e-?cig(arette)?|tobacco|nicotine|cigar(ette)?s?)\b/i,
       /\b(cbd|thc|cannabis|marijuana|kratom|drug paraphernalia)\b/i,
       /\b(sex toy|adult toy|lingerie|erotic)\b/i,
@@ -44,6 +49,9 @@ export const POLICY_RULES: PolicyRule[] = [
       /\b(weight[- ]?loss|slimming|fat burner|appetite)\b/i,
       /\b(alcohol|wine|beer|liquor)\b/i,
       /\b(contact lens(es)?|teeth whitening|hair growth|skin bleach(ing)?)\b/i,
+      // Culinary and utility knives "may be allowed"; 18+ only in several EU markets.
+      /\b(knife|knives|machete|dagger)s?\b/i,
+      /\b(prescription|medical device|hearing aids?|contraceptives?)\b/i,
     ],
   },
   {
@@ -56,6 +64,27 @@ export const POLICY_RULES: PolicyRule[] = [
       /\b(burns? fat|detox(ify)?|boosts? (your )?immun(e|ity))\b/i,
       /\b(clinically|medically|doctor)[- ](proven|approved|recommended)\b/i,
       /\bfda[- ]approved\b/i,
+    ],
+  },
+  {
+    ruleId: "policy.weight_body_image",
+    label: "body shaming or weight-loss claim",
+    verdict: "fail",
+    patterns: [
+      /\b(perfect|ideal|dream|beach)[- ]bod(y|ies)\b/i,
+      /\b(get|look|become|stay) (skinny|thin)\b/i,
+      /\b(slim|skinny) (legs|thighs|waist)\b/i,
+      /\bflat (tummy|belly|stomach)\b/i,
+      /\b(lose weight|weight loss|slim down|burns? fat)\b.{0,40}\b(without|no) (diet(ing)?|exercise|workout)/i,
+    ],
+  },
+  {
+    ruleId: "policy.before_after",
+    label: "before-and-after comparison",
+    verdict: "warn",
+    patterns: [
+      /\bbefore\s*(?:&|and|\/|vs\.?|\+|-|to)?\s*after\b/i,
+      /\b(avant|vorher|antes)\s*(?:\/|&|-|et|und|y)?\s*(apr[eè]s|nachher|despu[eé]s)(?![\p{L}])/iu,
     ],
   },
   {

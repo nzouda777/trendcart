@@ -1,14 +1,21 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import { IntegrationError, type IntegrationErrorCode } from "@/lib/domain/contracts";
 
 import { TIKTOK_ADS_PROVIDER } from "./config";
+import { realSleep } from "./safety";
 
 /*
  * Marketing API transport. Every response is HTTP 200 with an envelope:
  *   { code: number, message: string, request_id: string, data: {...} }
  * `code` 0 = success; anything else is mapped to an IntegrationError.
  * Tokens travel in the `Access-Token` header and are never logged.
+ *
+ * TikTok ids are int64. Some responses send them as JSON numbers, which
+ * JSON.parse would round past 2^53, so long integers under *_id / *_ids
+ * keys are quoted before parsing (quoteBigIds).
  */
 
 const envelopeSchema = z.object({
@@ -33,6 +40,38 @@ export function mapAdsErrorCode(code: number): IntegrationErrorCode {
   if (PERMISSION_CODES.has(code)) return "permission_denied";
   if (code >= 40000 && code < 50000) return "invalid_input";
   return "provider_error";
+}
+
+/** Error raised for a non-zero envelope code; keeps the raw TikTok code. */
+export class TikTokAdsApiError extends IntegrationError {
+  readonly apiCode: number;
+  constructor(apiCode: number, message: string) {
+    super(TIKTOK_ADS_PROVIDER, mapAdsErrorCode(apiCode), message);
+    this.name = "TikTokAdsApiError";
+    this.apiCode = apiCode;
+  }
+}
+
+/** Quotes integers of 16+ digits that sit under an `..._id` or `..._ids` key. */
+export function quoteBigIds(text: string): string {
+  const scalar = /("[A-Za-z0-9_]*_ids?"\s*:\s*)(-?\d{16,})(?=\s*[,}\]])/g;
+  const array = /("[A-Za-z0-9_]*_ids?"\s*:\s*\[)([^\]]*)\]/g;
+  return text
+    .replace(scalar, '$1"$2"')
+    .replace(array, (_m, head: string, body: string) => {
+      const quoted = body.replace(/(^|,)(\s*)(-?\d{16,})(\s*)(?=,|$)/g, '$1$2"$3"$4');
+      return `${head}${quoted}]`;
+    });
+}
+
+/**
+ * Deterministic request_id for create calls: TikTok de-duplicates creates
+ * that reuse one, so a retried create cannot double the entity. Numeric
+ * string under 2^63 (the documented int64 form).
+ */
+export function requestIdFor(...parts: string[]): string {
+  const hex = createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 15);
+  return BigInt(`0x${hex}`).toString(); // < 16^15 < 2^63
 }
 
 export type AdsRequest = {
@@ -83,7 +122,13 @@ export async function adsRequest<T>(
     );
   }
 
-  const parsed = envelopeSchema.safeParse(await res.json().catch(() => null));
+  let json: unknown = null;
+  try {
+    json = JSON.parse(quoteBigIds(await res.text()));
+  } catch {
+    json = null;
+  }
+  const parsed = envelopeSchema.safeParse(json);
   if (!parsed.success) {
     throw new IntegrationError(
       TIKTOK_ADS_PROVIDER,
@@ -93,9 +138,8 @@ export async function adsRequest<T>(
   }
   const env = parsed.data;
   if (env.code !== 0) {
-    throw new IntegrationError(
-      TIKTOK_ADS_PROVIDER,
-      mapAdsErrorCode(env.code),
+    throw new TikTokAdsApiError(
+      env.code,
       `TikTok Ads error ${env.code}: ${env.message}${env.request_id ? ` (request ${env.request_id})` : ""}`,
     );
   }
@@ -111,4 +155,38 @@ export async function adsRequest<T>(
     );
   }
   return data.data;
+}
+
+export type RetryPolicy = {
+  /** Total attempts, first included. */
+  attempts: number;
+  /**
+   * Whether an ambiguous failure (5xx, timeout, 5xxxx) may be retried: only
+   * for reads and writes that are idempotent (status updates, creates that
+   * carry a request_id). A rate-limit rejection is always retried: TikTok
+   * did not process it.
+   */
+  idempotent: boolean;
+  sleep?: (ms: number) => Promise<void>;
+  baseDelayMs?: number;
+};
+
+export function isRetryable(error: unknown, idempotent: boolean): boolean {
+  if (!(error instanceof IntegrationError)) return false;
+  if (error.code === "rate_limited") return true;
+  return idempotent && error.code === "provider_error";
+}
+
+/** Retries transient failures only, with exponential backoff. */
+export async function withRetry<T>(policy: RetryPolicy, fn: () => Promise<T>): Promise<T> {
+  const sleep = policy.sleep ?? realSleep;
+  const base = policy.baseDelayMs ?? 500;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= policy.attempts || !isRetryable(error, policy.idempotent)) throw error;
+      await sleep(base * 2 ** (attempt - 1));
+    }
+  }
 }

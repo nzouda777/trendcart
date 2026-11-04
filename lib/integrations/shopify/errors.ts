@@ -28,6 +28,33 @@ export class ShopifyNotImplementedError extends IntegrationError {
   }
 }
 
+/**
+ * attachVideoFromUrl: the video is attached but Shopify has not finished
+ * processing it within the call's polling budget. Retryable: calling again
+ * with the same idempotency key resumes polling (no second upload). The
+ * contract has no pending state (ShopifyMediaRef.status is READY | FAILED).
+ */
+export class ShopifyMediaProcessingError extends IntegrationError {
+  readonly mediaId: string;
+  readonly mediaStatus: string;
+
+  constructor(mediaId: string, mediaStatus: string) {
+    super(
+      PROVIDER,
+      "provider_error",
+      `Shopify is still processing the video (${mediaStatus}). Try again shortly.`,
+      { retryable: true },
+    );
+    this.name = "ShopifyMediaProcessingError";
+    this.mediaId = mediaId;
+    this.mediaStatus = mediaStatus;
+  }
+}
+
+export function isShopifyMediaProcessing(error: unknown): error is ShopifyMediaProcessingError {
+  return error instanceof ShopifyMediaProcessingError;
+}
+
 export function isShopifyNotImplemented(error: unknown): error is ShopifyNotImplementedError {
   return error instanceof ShopifyNotImplementedError;
 }

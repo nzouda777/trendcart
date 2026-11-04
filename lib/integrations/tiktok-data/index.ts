@@ -26,6 +26,21 @@ export {
   isPublicIp,
 } from "./net-guard";
 export { PROXY_SCHEMES, proxyKind } from "./http";
+export {
+  buildRelatedSearchQueries,
+  durationFitScore,
+  engagementScore,
+  findRelatedVideos,
+  rankRelatedCandidates,
+  recencyScore,
+  relevanceScore,
+  RANK_WEIGHTS,
+  RELATED_DEFAULTS,
+  type FindRelatedInput,
+  type FindRelatedResult,
+  type RankedCandidate,
+  type SearchResult,
+} from "./related";
 
 /** Registry factory (see lib/integrations/index.ts). */
 export function createTikTokDataProvider(

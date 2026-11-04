@@ -5,6 +5,8 @@ import {
   shopifyTokenSchema,
   type ShopifyAppCredentials,
   type ShopifyClient,
+  type ShopifyCredentials,
+  type ShopifyMediaRef,
   type ShopifyToken,
 } from "@/lib/domain/contracts";
 
@@ -22,9 +24,27 @@ export const shopifyInstallTokenSchema = shopifyTokenSchema.extend({
 });
 export type ShopifyInstallToken = z.infer<typeof shopifyInstallTokenSchema>;
 
+/**
+ * attachVideoFromUrl input: the contract's fields plus two optional ones the
+ * contract does not carry yet (reported for lib/domain/contracts.ts):
+ * - `idempotencyKey`: the Trendcart video id. A re-run with the same key never
+ *   adds a second Shopify video. Without it the key is the source URL's origin
+ *   and path, which changes when the provider re-signs the URL.
+ * - `proxyUrl`: decrypted brand proxy for the source download (else the
+ *   SSRF-guarded direct agent).
+ */
+export type AttachVideoInput = {
+  productId: string;
+  sourceUrl: string;
+  alt?: string;
+  idempotencyKey?: string;
+  proxyUrl?: string;
+};
+
 /** ShopifyClient plus the token-lifecycle methods the contract does not cover yet. */
 export interface ShopifyAdapter extends ShopifyClient {
   readonly mode: "mock" | "live";
+  attachVideoFromUrl(creds: ShopifyCredentials, input: AttachVideoInput): Promise<ShopifyMediaRef>;
   completeInstall(input: {
     query: Record<string, string>;
     expectedState: string;

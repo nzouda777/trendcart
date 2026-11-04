@@ -21,7 +21,14 @@ import "server-only";
  * Calls go to Anthropic directly (no brand proxy: no third-party site is fetched).
  */
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { APICallError, generateText, NoObjectGeneratedError, Output, type LanguageModel } from "ai";
+import {
+  APICallError,
+  RetryError,
+  generateText,
+  NoObjectGeneratedError,
+  Output,
+  type LanguageModel,
+} from "ai";
 import { z } from "zod";
 
 import {
@@ -330,6 +337,8 @@ export type LiveCopywriterOptions = {
 
 function mapModelError(error: unknown): never {
   if (error instanceof IntegrationError) throw error;
+  // After the SDK retry, the HTTP status is on the last attempt.
+  if (RetryError.isInstance(error)) return mapModelError(error.lastError);
   if (NoObjectGeneratedError.isInstance(error)) {
     throw new IntegrationError(
       PROVIDER,
@@ -423,8 +432,9 @@ export function createLiveCopywriter(options: LiveCopywriterOptions = {}): Copyw
                   content: [
                     { type: "text" as const, text: request.prompt },
                     ...request.imageUrls.map((url) => ({
-                      type: "image" as const,
-                      image: new URL(url),
+                      type: "file" as const,
+                      mediaType: "image",
+                      data: { type: "url" as const, url: new URL(url) },
                     })),
                   ],
                 },

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import {
   IntegrationError,
@@ -9,9 +9,12 @@ import {
   shopifyShopInfoSchema,
   type OAuthStart,
   type ShopifyAppCredentials,
+  shopifyMediaRefSchema,
   type ShopifyCredentials,
+  type ShopifyMediaRef,
   type ShopifyShopInfo,
 } from "@/lib/domain/contracts";
+import { createHttpClient, networkError } from "@/lib/integrations/tiktok-data/http";
 
 import {
   ENSURED_METAFIELD_DEFINITIONS,
@@ -22,10 +25,11 @@ import {
   SHOPIFY_SCOPES,
   type ShopifyMetafieldDefinitionSpec,
 } from "./config";
-import { codeForStatus, shopifyError, ShopifyNotImplementedError } from "./errors";
+import { codeForStatus, shopifyError, ShopifyMediaProcessingError } from "./errors";
 import {
   adminGraphql,
   assertNoUserErrors,
+  realSleep,
   type FetchLike,
   type Sleep,
   type UserError,
@@ -71,9 +75,36 @@ import {
 import {
   missingScopes,
   tokenFromResponse,
+  type AttachVideoInput,
   type ShopifyAdapter,
   type ShopifyInstallToken,
 } from "./types";
+import {
+  declaredSize,
+  DEFAULT_MAX_VIDEO_BYTES,
+  DEFAULT_VIDEO_POLL_TIMEOUT_MS,
+  DEFAULT_VIDEO_TRANSFER_TIMEOUT_MS,
+  filenameHasMarker,
+  compareGids,
+  mediaErrorDetail,
+  multipartUpload,
+  pickVideoUrl,
+  PRODUCT_ATTACH_MEDIA_MUTATION,
+  PRODUCT_VIDEOS_QUERY,
+  sourceKey,
+  STAGED_UPLOADS_CREATE_MUTATION,
+  VIDEO_NODE_QUERY,
+  VIDEO_POLL_INITIAL_MS,
+  VIDEO_POLL_MAX_INTERVAL_MS,
+  videoFilename,
+  videoMarker,
+  videoTypeOf,
+  type AttachMediaData,
+  type ProductVideosData,
+  type StagedUploadsData,
+  type VideoNode,
+  type VideoNodeData,
+} from "./video";
 
 /*
  * Live Shopify adapter (Admin GraphQL, pinned version from config.ts).
@@ -84,8 +115,10 @@ import {
  *
  * M1: OAuth, HMAC, shop info, template discovery, metafield definitions.
  * M2: createDraftProduct (productSet upsert), publishProduct (ACTIVE +
- * Online Store publication), deleteProductMedia (fileDelete).
- * M3 (throws ShopifyNotImplementedError): attachVideoFromUrl.
+ * Online Store publication), deleteProductMedia (fileDelete: images and
+ * videos alike).
+ * M3: attachVideoFromUrl (staged upload streamed from the source, see
+ * ./video), short per-connection cache for listProductTemplates.
  */
 
 export type LiveShopifyOptions = {
@@ -94,9 +127,23 @@ export type LiveShopifyOptions = {
   apiVersion?: string;
   fetch?: FetchLike;
   now?: () => number;
-  /** Injectable for tests (throttle waits). */
+  /** Injectable for tests (throttle waits, video polling). */
   sleep?: Sleep;
+  /**
+   * Fetch for the video source, per brand proxy. Defaults to the shared
+   * outbound client (brand proxy, else the SSRF-guarded agent).
+   */
+  sourceFetch?: (proxyUrl: string | undefined) => FetchLike;
+  maxVideoBytes?: number;
+  videoTransferTimeoutMs?: number;
+  videoPollTimeoutMs?: number;
+  /** listProductTemplates cache lifetime per connection (0 disables it). */
+  templateCacheTtlMs?: number;
 };
+
+/** Short: the template picker re-checks the live theme when a suffix is saved. */
+export const DEFAULT_TEMPLATE_CACHE_TTL_MS = 30_000;
+const TEMPLATE_CACHE_MAX_ENTRIES = 500;
 
 /* ------------------------------- Operations ------------------------------- */
 
@@ -386,6 +433,34 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
   /** Online Store publication id per shop (stable for the life of the store). */
   const publicationIds = new Map<string, string>();
 
+  /**
+   * listProductTemplates results per connection (shop + token hash, so a
+   * revoked or rotated token never reads another token's entry). In-memory per
+   * function instance: bounds the Shopify calls a page or a viewer can cause.
+   */
+  const templateCache = new Map<string, { expiresAt: number; value: Promise<(string | null)[]> }>();
+  const templateCacheTtl = options.templateCacheTtlMs ?? DEFAULT_TEMPLATE_CACHE_TTL_MS;
+  const templateCacheKey = (creds: ShopifyCredentials) =>
+    `${creds.shopDomain}|${createHash("sha256").update(creds.accessToken).digest("hex").slice(0, 16)}`;
+  function forgetTemplates(shopDomain: string) {
+    for (const key of templateCache.keys()) {
+      if (key.startsWith(`${shopDomain}|`)) templateCache.delete(key);
+    }
+  }
+
+  const sleep = options.sleep ?? realSleep;
+  const sourceFetch =
+    options.sourceFetch ??
+    ((proxyUrl: string | undefined): FetchLike => {
+      const http = createHttpClient(
+        { proxyUrl },
+        { timeoutMs: options.videoTransferTimeoutMs ?? DEFAULT_VIDEO_TRANSFER_TIMEOUT_MS },
+      );
+      // undici's Response is the platform Response at runtime.
+      return (url, init) =>
+        http(url, init as Parameters<typeof http>[1]) as unknown as Promise<Response>;
+    });
+
   async function tokenRequest(
     shopDomain: string,
     body: Record<string, string>,
@@ -507,22 +582,22 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
     },
 
     async listProductTemplates(creds) {
-      const filenames: string[] = [];
-      let after: string | null = null;
-      // A theme has at most a few dozen product templates; cap pages defensively.
-      for (let page = 0; page < 10; page++) {
-        const data: TemplatesData = await gql<TemplatesData>(creds, PRODUCT_TEMPLATES_QUERY, {
-          after,
-        });
-        const theme = data.themes.nodes[0];
-        if (!theme) throw shopifyError("not_found", "The store has no published (MAIN) theme.");
-        const files = theme.files;
-        if (!files) break;
-        filenames.push(...files.nodes.map((n) => n.filename));
-        if (!files.pageInfo.hasNextPage || !files.pageInfo.endCursor) break;
-        after = files.pageInfo.endCursor;
+      if (templateCacheTtl <= 0) return fetchProductTemplates(creds);
+      const key = templateCacheKey(creds);
+      const hit = templateCache.get(key);
+      if (hit && hit.expiresAt > now()) return [...(await hit.value)];
+      const value = fetchProductTemplates(creds);
+      templateCache.delete(key);
+      if (templateCache.size >= TEMPLATE_CACHE_MAX_ENTRIES) {
+        const oldest = templateCache.keys().next().value;
+        if (oldest !== undefined) templateCache.delete(oldest);
       }
-      return parseTemplateSuffixes(filenames);
+      templateCache.set(key, { expiresAt: now() + templateCacheTtl, value });
+      // Errors are never cached.
+      value.catch(() => {
+        if (templateCache.get(key)?.value === value) templateCache.delete(key);
+      });
+      return [...(await value)];
     },
 
     async getProductTemplateStructure(creds, suffix) {
@@ -624,6 +699,7 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
         throw error;
       }
       assertNoUserErrors("themeFilesUpsert", data.themeFilesUpsert.userErrors);
+      forgetTemplates(creds.shopDomain);
     },
 
     ensureMetafieldDefinitions,
@@ -673,31 +749,12 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       return toProductRef(creds.shopDomain, data.productSet.product);
     },
 
-    async attachVideoFromUrl() {
-      // TODO(M3): stagedUploadsCreate(resource: VIDEO) -> stream sourceUrl body
-      // into the staged target (no disk buffering) -> productUpdate media
-      // { originalSource: resourceUrl, mediaContentType: VIDEO } -> poll
-      // node(id).status until READY -> return id + sources[0].url.
-      throw new ShopifyNotImplementedError("attachVideoFromUrl");
-    },
+    attachVideoFromUrl,
 
     async deleteProductMedia(creds, { productId, mediaIds }) {
       assertProductGid(productId);
-      const ids = [...new Set(mediaIds)];
-      if (ids.length === 0) return;
-      assertMediaGids(ids);
-      // Product media are files: fileDelete detaches them from the product and
-      // removes them from the store (we keep no copy). 250 per call (API limit).
-      for (let i = 0; i < ids.length; i += 250) {
-        const data = await gql<FileDeleteData>(creds, FILE_DELETE_MUTATION, {
-          fileIds: ids.slice(i, i + 250),
-        });
-        // Already gone (earlier run, or removed by the merchant): success.
-        assertNoUserErrors(
-          "fileDelete",
-          data.fileDelete.userErrors.filter((e) => e.code !== "FILE_DOES_NOT_EXIST"),
-        );
-      }
+      // Images (MediaImage) and videos (Video) alike: both are files.
+      await deleteFiles(creds, [...new Set(mediaIds)]);
     },
 
     async publishProduct(creds, productId) {
@@ -741,6 +798,277 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       return toProductRef(creds.shopDomain, data.productUpdate.product);
     },
   };
+
+  async function fetchProductTemplates(creds: ShopifyCredentials): Promise<(string | null)[]> {
+    const filenames: string[] = [];
+    let after: string | null = null;
+    // A theme has at most a few dozen product templates; cap pages defensively.
+    for (let page = 0; page < 10; page++) {
+      const data: TemplatesData = await gql<TemplatesData>(creds, PRODUCT_TEMPLATES_QUERY, {
+        after,
+      });
+      const theme = data.themes.nodes[0];
+      if (!theme) throw shopifyError("not_found", "The store has no published (MAIN) theme.");
+      const files = theme.files;
+      if (!files) break;
+      filenames.push(...files.nodes.map((n) => n.filename));
+      if (!files.pageInfo.hasNextPage || !files.pageInfo.endCursor) break;
+      after = files.pageInfo.endCursor;
+    }
+    return parseTemplateSuffixes(filenames);
+  }
+
+  /* ------------------------------ Video media ------------------------------ */
+
+  /**
+   * Streams the source into a staged upload, attaches it and waits until
+   * READY (see ./video for the flow). Idempotent per `idempotencyKey`: a
+   * video already on the product is reused (READY: returned; processing:
+   * polled; FAILED: deleted and uploaded again). When processing outlasts the
+   * poll budget it throws the retryable ShopifyMediaProcessingError; calling
+   * again resumes polling without a second upload.
+   */
+  async function attachVideoFromUrl(
+    creds: ShopifyCredentials,
+    input: AttachVideoInput,
+  ): Promise<ShopifyMediaRef> {
+    assertProductGid(input.productId);
+    const source = parseSourceUrl(input.sourceUrl);
+    const marker = videoMarker(input.idempotencyKey?.trim() || sourceKey(source));
+
+    let video = await findOwnVideo(creds, input.productId, marker);
+    if (video?.status === "FAILED") {
+      await deleteFiles(creds, [video.id]);
+      video = null;
+    }
+    if (!video) {
+      await uploadAndAttach(creds, input, source, marker);
+      video = await findOwnVideo(creds, input.productId, marker);
+      if (!video) {
+        throw shopifyError("provider_error", "Shopify did not list the attached video.");
+      }
+    }
+    return waitUntilReady(creds, video);
+  }
+
+  function parseSourceUrl(value: string): string {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw shopifyError("invalid_input", "The video source must be a URL.", { retryable: false });
+    }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      throw shopifyError("invalid_input", "The video source must be a plain http(s) URL.", {
+        retryable: false,
+      });
+    }
+    return url.toString();
+  }
+
+  /**
+   * Our video on the product: the oldest one when a concurrent run added a
+   * second (the extras are deleted). not_found when the product is gone.
+   */
+  async function findOwnVideo(
+    creds: ShopifyCredentials,
+    productId: string,
+    marker: string,
+  ): Promise<VideoNode | null> {
+    const data = await gql<ProductVideosData>(creds, PRODUCT_VIDEOS_QUERY, { id: productId });
+    if (!data.product) {
+      throw shopifyError("not_found", "Shopify product not found.", { retryable: false });
+    }
+    const ours = data.product.media.nodes
+      .filter((m) => m.mediaContentType === "VIDEO" && filenameHasMarker(m.filename, marker))
+      .map((m) => toVideoNode(m))
+      .sort((x, y) => compareGids(x.id, y.id));
+    const [first, ...duplicates] = ours;
+    if (duplicates.length > 0) {
+      await deleteFiles(
+        creds,
+        duplicates.map((d) => d.id),
+      );
+    }
+    return first ?? null;
+  }
+
+  async function uploadAndAttach(
+    creds: ShopifyCredentials,
+    input: AttachVideoInput,
+    sourceUrl: string,
+    marker: string,
+  ): Promise<void> {
+    const maxBytes = options.maxVideoBytes ?? DEFAULT_MAX_VIDEO_BYTES;
+    // One deadline for the download and the upload (the body flows through).
+    const signal = AbortSignal.timeout(
+      options.videoTransferTimeoutMs ?? DEFAULT_VIDEO_TRANSFER_TIMEOUT_MS,
+    );
+
+    let response: Response;
+    try {
+      response = await sourceFetch(input.proxyUrl)(sourceUrl, {
+        method: "GET",
+        redirect: "follow",
+        signal,
+      });
+    } catch (cause) {
+      throw rebrand(networkError("shopify", cause), "Downloading the video source failed.");
+    }
+    const body = response.body;
+    if (!response.ok || !body) {
+      await body?.cancel().catch(() => undefined);
+      throw sourceStatusError(response.status);
+    }
+
+    let staged: StagedUpload;
+    let filename: string;
+    let mimeType: string;
+    let size: number;
+    try {
+      size = declaredSize(response.headers.get("content-length"), maxBytes);
+      const type = videoTypeOf(response.headers.get("content-type"), sourceUrl);
+      mimeType = type.mimeType;
+      filename = videoFilename(marker, type.extension);
+      staged = await createStagedTarget(creds, { filename, mimeType, size });
+    } catch (error) {
+      await body.cancel().catch(() => undefined);
+      throw error;
+    }
+
+    const upload = multipartUpload({
+      parameters: staged.parameters,
+      filename,
+      mimeType,
+      size,
+      source: body,
+    });
+    let uploaded: Response;
+    try {
+      uploaded = await doFetch(staged.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": upload.contentType,
+          // Exact length: the storage form POST gets no chunked encoding.
+          "Content-Length": String(upload.contentLength),
+        },
+        body: upload.body,
+        // Required by fetch for a streamed request body.
+        duplex: "half",
+        signal,
+        cache: "no-store",
+      } as RequestInit);
+    } catch (cause) {
+      await upload.body.cancel().catch(() => undefined);
+      throw shopifyError("provider_error", "Streaming the video to Shopify failed.", { cause });
+    }
+    if (!uploaded.ok) {
+      await uploaded.body?.cancel().catch(() => undefined);
+      throw shopifyError(
+        uploaded.status === 400 ? "invalid_input" : "provider_error",
+        `Shopify's upload target responded ${uploaded.status}.`,
+        // 403: the signed policy expired; a retry gets a new staged target.
+        {
+          retryable: uploaded.status >= 500 || uploaded.status === 429 || uploaded.status === 403,
+        },
+      );
+    }
+
+    const attached = await gql<AttachMediaData>(creds, PRODUCT_ATTACH_MEDIA_MUTATION, {
+      product: { id: input.productId },
+      media: [
+        {
+          originalSource: staged.resourceUrl,
+          mediaContentType: "VIDEO",
+          ...(input.alt?.trim() ? { alt: input.alt.trim().slice(0, 512) } : {}),
+        },
+      ],
+    });
+    const errors = attached.productUpdate.userErrors;
+    if (errors.some(isProductMissingError) || (!attached.productUpdate.product && !errors.length)) {
+      throw shopifyError("not_found", "Shopify product not found.", { retryable: false });
+    }
+    assertNoUserErrors("productUpdate media", errors);
+  }
+
+  async function createStagedTarget(
+    creds: ShopifyCredentials,
+    file: { filename: string; mimeType: string; size: number },
+  ): Promise<StagedUpload> {
+    const data = await gql<StagedUploadsData>(creds, STAGED_UPLOADS_CREATE_MUTATION, {
+      input: [
+        {
+          resource: "VIDEO",
+          filename: file.filename,
+          mimeType: file.mimeType,
+          fileSize: String(file.size),
+          httpMethod: "POST",
+        },
+      ],
+    });
+    assertNoUserErrors("stagedUploadsCreate", data.stagedUploadsCreate.userErrors);
+    const target = data.stagedUploadsCreate.stagedTargets?.[0];
+    if (!target?.url || !target.resourceUrl || !target.url.startsWith("https://")) {
+      throw shopifyError("provider_error", "stagedUploadsCreate returned no usable target.");
+    }
+    return { url: target.url, resourceUrl: target.resourceUrl, parameters: target.parameters };
+  }
+
+  async function waitUntilReady(
+    creds: ShopifyCredentials,
+    initial: VideoNode,
+  ): Promise<ShopifyMediaRef> {
+    const deadline = now() + (options.videoPollTimeoutMs ?? DEFAULT_VIDEO_POLL_TIMEOUT_MS);
+    let video = initial;
+    let interval = VIDEO_POLL_INITIAL_MS;
+    for (;;) {
+      if (video.status === "READY") {
+        const fileUrl = pickVideoUrl(video);
+        if (fileUrl) {
+          return shopifyMediaRefSchema.parse({ mediaId: video.id, fileUrl, status: "READY" });
+        }
+        // READY without an MP4 rendition yet: renditions can lag, keep polling.
+      }
+      if (video.status === "FAILED") {
+        // Never leave a broken video on the page; the next call uploads again.
+        await deleteFiles(creds, [video.id]);
+        throw shopifyError(
+          "provider_error",
+          `Shopify could not process the video${mediaErrorDetail(video)}.`,
+          { retryable: false },
+        );
+      }
+      if (now() + interval > deadline) {
+        throw new ShopifyMediaProcessingError(video.id, video.status);
+      }
+      await sleep(interval);
+      interval = Math.min(VIDEO_POLL_MAX_INTERVAL_MS, Math.round(interval * 1.5));
+      const data = await gql<VideoNodeData>(creds, VIDEO_NODE_QUERY, { id: video.id });
+      const node = data.node;
+      if (!node?.id) {
+        // Removed meanwhile (merchant or a concurrent cleanup): the next call uploads again.
+        throw shopifyError("provider_error", "The Shopify video disappeared while processing.");
+      }
+      video = toVideoNode({ ...node, id: node.id });
+    }
+  }
+
+  async function deleteFiles(creds: ShopifyCredentials, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    assertMediaGids(ids);
+    // Product media are files: fileDelete detaches them from the product and
+    // removes them from the store (we keep no copy). 250 per call (API limit).
+    for (let i = 0; i < ids.length; i += 250) {
+      const data = await gql<FileDeleteData>(creds, FILE_DELETE_MUTATION, {
+        fileIds: ids.slice(i, i + 250),
+      });
+      // Already gone (earlier run, or removed by the merchant): success.
+      assertNoUserErrors(
+        "fileDelete",
+        data.fileDelete.userErrors.filter((e) => e.code !== "FILE_DOES_NOT_EXIST"),
+      );
+    }
+  }
 
   /** templates/product[.suffix].json of the live theme, parsed. */
   async function readTemplateJson(
@@ -847,4 +1175,54 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
     }
     assertNoUserErrors(`metafieldDefinitionCreate ${spec.namespace}.${spec.key}`, errors);
   }
+}
+
+type StagedUpload = {
+  url: string;
+  resourceUrl: string;
+  parameters: { name: string; value: string }[];
+};
+
+function toVideoNode(node: Partial<VideoNode> & { id: string }): VideoNode {
+  return {
+    id: node.id,
+    status: node.status ?? "PROCESSING",
+    filename: node.filename ?? "",
+    mediaErrors: node.mediaErrors ?? [],
+    sources: node.sources ?? [],
+    originalSource: node.originalSource ?? null,
+  };
+}
+
+/**
+ * Source download HTTP failure. 403/404/410 usually mean an expired signed
+ * provider URL: retryable, the caller resolves a fresh URL first.
+ */
+function sourceStatusError(status: number): IntegrationError {
+  if (status === 403 || status === 404 || status === 410) {
+    return shopifyError(
+      "not_found",
+      `The video source responded ${status} (expired or removed). Resolve a fresh URL and try again.`,
+      { retryable: true },
+    );
+  }
+  if (status === 429) {
+    return shopifyError("rate_limited", "The video source responded 429.", { retryable: true });
+  }
+  if (status >= 500 || status < 400) {
+    return shopifyError("provider_error", `The video source responded ${status}.`, {
+      retryable: true,
+    });
+  }
+  return shopifyError("invalid_input", `The video source responded ${status}.`, {
+    retryable: false,
+  });
+}
+
+/** A shared-client error re-labelled as Shopify's (the provider callers branch on). */
+function rebrand(error: IntegrationError, message: string): IntegrationError {
+  return shopifyError(error.code, `${message} ${error.message}`, {
+    cause: error.cause ?? error,
+    retryable: error.retryable,
+  });
 }

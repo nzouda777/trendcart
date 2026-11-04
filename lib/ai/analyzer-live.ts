@@ -22,6 +22,7 @@ import "server-only";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import {
   APICallError,
+  RetryError,
   generateText,
   NoObjectGeneratedError,
   Output,
@@ -140,6 +141,8 @@ export type LiveAnalyzerOptions = {
 
 function mapModelError(error: unknown): never {
   if (error instanceof IntegrationError) throw error;
+  // After the SDK retry, the HTTP status is on the last attempt.
+  if (RetryError.isInstance(error)) return mapModelError(error.lastError);
   if (NoObjectGeneratedError.isInstance(error)) {
     throw new IntegrationError(
       "google",
