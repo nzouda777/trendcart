@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { IntegrationError } from "@/lib/domain/contracts";
 import type { WorkspaceContext } from "@/lib/tenant/context";
@@ -14,7 +14,24 @@ import {
   nextActionFor,
   resumeHookToken,
 } from "./config";
-import { createDurablePipeline, type DurableEngine } from "./pipeline";
+import {
+  createDurablePipeline,
+  type DurableEngine,
+  StaleDeploymentRunError,
+  vercelWorkflowEngine,
+} from "./pipeline";
+
+const workflowApi = vi.hoisted(() => ({
+  getHookByToken: vi.fn(),
+  resumeHook: vi.fn(async () => undefined),
+  cancel: vi.fn(async () => undefined),
+}));
+vi.mock("workflow/api", () => ({
+  getHookByToken: workflowApi.getHookByToken,
+  resumeHook: workflowApi.resumeHook,
+  getRun: () => ({ cancel: workflowApi.cancel }),
+  start: vi.fn(),
+}));
 
 /** Just enough of a WorkspaceContext for code paths that only read the product. */
 function fakeCtx(status = "sourcing"): WorkspaceContext {
@@ -107,6 +124,20 @@ describe("durable pipeline adapter", () => {
     );
     expect(none.resume).toHaveBeenCalledTimes(4);
     expect(none.startRun).toHaveBeenCalledWith("w1", "p1");
+  });
+
+  it("starts a run on the current deployment right away when the waiting run is older", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const engine: DurableEngine = {
+      startRun: vi.fn(async () => ({ runId: "run_new" })),
+      resume: vi.fn(async () => {
+        throw new StaleDeploymentRunError("run_old");
+      }),
+    };
+    await createDurablePipeline(engine, { sleep }).resumeStep(fakeCtx(), "p1", "build");
+    expect(engine.resume).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(engine.startRun).toHaveBeenCalledWith("w1", "p1");
   });
 
   it("does nothing for gates without a rejection path", async () => {
@@ -211,5 +242,61 @@ describe("Shopify draft variants and images", () => {
     expect(draftImageUrls(["http://x/1.jpg", "not a url", null], urls, [urls[0]])).toEqual(
       urls.slice(0, 10),
     );
+  });
+});
+
+describe("vercelWorkflowEngine.resume: runs pinned to a deployment", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.clearAllMocks();
+  });
+
+  it("cancels a run from an older deployment instead of waking it", async () => {
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_new");
+    workflowApi.getHookByToken.mockResolvedValue({
+      runId: "run_old",
+      resumeContext: { deploymentId: "dpl_old", workflowName: "productWorkflow" },
+    });
+    await expect(vercelWorkflowEngine.resume("tok", { reason: "retry" })).rejects.toBeInstanceOf(
+      StaleDeploymentRunError,
+    );
+    expect(workflowApi.cancel).toHaveBeenCalledOnce();
+    expect(workflowApi.resumeHook).not.toHaveBeenCalled();
+  });
+
+  it("still asks for a new run when the old one cannot be cancelled", async () => {
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_new");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    workflowApi.getHookByToken.mockResolvedValue({
+      runId: "run_old",
+      resumeContext: { deploymentId: "dpl_old", workflowName: "productWorkflow" },
+    });
+    workflowApi.cancel.mockRejectedValueOnce(new Error("already completed"));
+    await expect(vercelWorkflowEngine.resume("tok", { reason: "retry" })).rejects.toBeInstanceOf(
+      StaleDeploymentRunError,
+    );
+  });
+
+  it("wakes a run of the current deployment", async () => {
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_new");
+    workflowApi.getHookByToken.mockResolvedValue({
+      runId: "run_1",
+      resumeContext: { deploymentId: "dpl_new", workflowName: "productWorkflow" },
+    });
+    await vercelWorkflowEngine.resume("tok", { reason: "retry" });
+    expect(workflowApi.cancel).not.toHaveBeenCalled();
+    expect(workflowApi.resumeHook).toHaveBeenCalledWith("tok", { reason: "retry" });
+  });
+
+  it("wakes the hook directly outside Vercel (no deployment id) or for a legacy hook", async () => {
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "");
+    await vercelWorkflowEngine.resume("tok", { reason: "retry" });
+    expect(workflowApi.getHookByToken).not.toHaveBeenCalled();
+
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_new");
+    workflowApi.getHookByToken.mockResolvedValue({ runId: "run_legacy" });
+    await vercelWorkflowEngine.resume("tok", { reason: "retry" });
+    expect(workflowApi.cancel).not.toHaveBeenCalled();
+    expect(workflowApi.resumeHook).toHaveBeenCalledTimes(2);
   });
 });
