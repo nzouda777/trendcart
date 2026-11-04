@@ -54,11 +54,34 @@ async function get(fetchImpl: typeof fetch, url: string, init: RequestInit): Pro
   }
 }
 
+/**
+ * The source must be a plain https URL (the stored Shopify file URL): no
+ * other scheme and no credentials. Checked before any request; the fetch
+ * itself goes through the SSRF-guarded client (see live.ts), which refuses
+ * non-public addresses on every connection and redirect hop.
+ */
+export function assertSafeSourceUrl(sourceUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    throw fail("invalid_input", "The video source is not a valid URL.", false);
+  }
+  if (url.protocol !== "https:") {
+    throw fail("invalid_input", "The video source must use https.", false);
+  }
+  if (url.username || url.password) {
+    throw fail("invalid_input", "The video source must not carry credentials.", false);
+  }
+  return url;
+}
+
 /** Size and type of the source video, without downloading it. */
 export async function probeSource(
   fetchImpl: typeof fetch,
   sourceUrl: string,
 ): Promise<{ size: number; contentType: VideoContentType }> {
+  assertSafeSourceUrl(sourceUrl);
   const head = await get(fetchImpl, sourceUrl, { method: "HEAD" });
   const len = Number(head.headers.get("content-length"));
   if (head.ok && Number.isSafeInteger(len) && len > 0) {
@@ -107,17 +130,21 @@ async function readChunk(
 }
 
 export async function transferChunks(input: {
+  /** TikTok upload_url PUTs. */
   fetchImpl: typeof fetch;
+  /** Source Range GETs: the SSRF-guarded client in production. */
+  sourceFetch: typeof fetch;
   sourceUrl: string;
   uploadUrl: string;
   plan: ChunkPlan;
   contentType: VideoContentType;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<void> {
-  const { fetchImpl, sourceUrl, uploadUrl, plan, contentType } = input;
+  const { fetchImpl, sourceFetch, sourceUrl, uploadUrl, plan, contentType } = input;
   const sleep = input.sleep ?? realSleep;
+  assertSafeSourceUrl(sourceUrl);
   for (const chunk of plan.chunks) {
-    const bytes = await readChunk(fetchImpl, sourceUrl, chunk, plan);
+    const bytes = await readChunk(sourceFetch, sourceUrl, chunk, plan);
     const isLast = chunk.index === plan.totalChunkCount - 1;
     for (let attempt = 1; ; attempt++) {
       const res = await get(fetchImpl, uploadUrl, {

@@ -16,6 +16,8 @@ import {
   type TikTokPublishStatus,
 } from "@/lib/domain/contracts";
 
+import { createHttpClient } from "@/lib/integrations/tiktok-data/http";
+
 import { getRateLimiter, keyForSecret, type RateLimiter } from "../tiktok-ads/rate-limit";
 import { assertNotUnderTest, realSleep, type Env } from "../tiktok-ads/safety";
 
@@ -24,15 +26,23 @@ import {
   LOGIN_AUTHORIZE_URL,
   LOGIN_SCOPES,
   OPEN_API_BASE,
+  PUBLISH_LOCK_TTL_MS,
   readLoginConfig,
   TIKTOK_POSTING_PROVIDER,
 } from "./config";
 import { planChunks } from "./chunks";
 import { oauthForm, postingJson } from "./http";
-import { probeSource, transferChunks } from "./upload";
+import { assertSafeSourceUrl, probeSource, transferChunks } from "./upload";
 
 export type LiveTikTokPostingOptions = {
+  /** TikTok API calls and upload_url PUTs. */
   fetch?: typeof fetch;
+  /**
+   * Source video reads (HEAD and Range GETs). Defaults to the SSRF-guarded
+   * client (lib/integrations/tiktok-data/http, as the Shopify video upload
+   * uses), never to `fetch`: tests inject both.
+   */
+  sourceFetch?: typeof fetch;
   env?: Env;
   rateLimiter?: RateLimiter;
   now?: () => Date;
@@ -94,10 +104,28 @@ const creatorInfoDataSchema = z.object({
   max_video_post_duration_sec: z.number().int().positive().default(60),
 });
 
+/** Long enough for one 10 MB chunk on a slow CDN; the probe is tiny. */
+const SOURCE_TIMEOUT_MS = 60_000;
+
+/**
+ * No brand proxy here: publishVideoFromUrl's contract input carries none.
+ * The guarded agent refuses non-public addresses on every hop.
+ */
+function guardedSourceFetch(): typeof fetch {
+  const http = createHttpClient({ proxyUrl: undefined }, { timeoutMs: SOURCE_TIMEOUT_MS });
+  // undici's Response is the platform Response at runtime.
+  return ((url: string | URL | Request, init?: RequestInit) =>
+    http(
+      url instanceof Request ? url.url : url,
+      init as Parameters<typeof http>[1],
+    )) as unknown as typeof fetch;
+}
+
 export function createLiveTikTokPostingClient(
   options: LiveTikTokPostingOptions = {},
 ): TikTokPostingClient {
   const fetchImpl = options.fetch ?? fetch;
+  const sourceFetch = options.sourceFetch ?? guardedSourceFetch();
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? realSleep;
@@ -195,6 +223,8 @@ export function createLiveTikTokPostingClient(
 
     async publishVideoFromUrl(rawInput): Promise<{ publishId: string }> {
       const input = publishInputSchema.parse(rawInput);
+      // Before any request (N2): https only, no credentials.
+      assertSafeSourceUrl(input.sourceUrl);
       const privacy = input.privacyLevel;
       // Never post publicly while unaudited, and never post at all from tests
       // (a test may opt in only with an injected fetch stub).
@@ -218,14 +248,16 @@ export function createLiveTikTokPostingClient(
       }
 
       // 2. Size and type of the Shopify file, then the chunk plan.
-      const source = await probeSource(fetchImpl, input.sourceUrl);
+      const source = await probeSource(sourceFetch, input.sourceUrl);
       const plan = planChunks(source.size);
 
       // One publish per (profile, source) at a time: a double click or a
-      // concurrent retry must not post the same video twice.
+      // concurrent retry must not post the same video twice. The TTL is
+      // shorter than the service's stale post claim (PUBLISH_CLAIM_STALE_MS),
+      // so a claim taken over as stale never meets this lock still held.
       const result = await limiter().withLock(
         `tiktok:publish:${tokenKey}:${keyForSecret(input.sourceUrl)}`,
-        15 * 60_000,
+        PUBLISH_LOCK_TTL_MS,
         async () => {
           // 3. Init. Not retried on ambiguous errors: it is not idempotent.
           await limiter().take("posting.init", `token:${tokenKey}`);
@@ -253,6 +285,7 @@ export function createLiveTikTokPostingClient(
           // 4. Stream the chunks from the source to TikTok.
           await transferChunks({
             fetchImpl,
+            sourceFetch,
             sourceUrl: input.sourceUrl,
             uploadUrl: init.upload_url,
             plan,

@@ -3,7 +3,12 @@ import type { IntegrationsMode, TikTokPostingClient } from "@/lib/domain/contrac
 import { createLiveTikTokPostingClient, type LiveTikTokPostingOptions } from "./live";
 import { createMockTikTokPostingClient } from "./mock";
 
-export { isPostingAudited, LOGIN_SCOPES } from "./config";
+export {
+  isPostingAudited,
+  LOGIN_SCOPES,
+  PUBLISH_CLAIM_STALE_MS,
+  PUBLISH_LOCK_TTL_MS,
+} from "./config";
 export { planChunks } from "./chunks";
 
 /** Registry factory (see lib/integrations/index.ts). */

@@ -11,10 +11,12 @@ import {
 
 import fx from "./__fixtures__/marketing-api-v1.3.json";
 import { ADS_PROD_BASE, ADS_SANDBOX_BASE } from "./config";
-import { quoteBigIds, requestIdFor, withRetry } from "./http";
+import { quoteBigIds, requestIdFor, TimeBudgetError, withRetry } from "./http";
+import { STATS_CALL_BUDGET_MS, STATS_MAX_WINDOW_HOURS } from "./limits";
 import { createTikTokAdsClient } from "./index";
 import { createLiveTikTokAdsClient, type LiveTikTokAdsOptions } from "./live";
-import { createMockTikTokAdsClient, MOCK_ADS_AUTH_CODE } from "./mock";
+import { BUDGET_FLOORS } from "./budget";
+import { createMockTikTokAdsClient, MOCK_ADS_AUTH_CODE, MOCK_ADVERTISERS } from "./mock";
 import { noopRateLimiter, type RateLimiter } from "./rate-limit";
 import { localDatesFor, localToUtc } from "./report";
 import { isTestEnvironment, UnsafeActionError } from "./safety";
@@ -216,12 +218,106 @@ describe("tiktok ads mock: contract conformance", () => {
     ).rejects.toMatchObject({ code: "not_found" });
   });
 
-  it("re-creating the same spec returns the same ids and keeps their status (like live)", async () => {
+  it("re-creating the same spec returns the same ids while paused (like live)", async () => {
+    const client = createMockTikTokAdsClient();
+    const ids = await client.createPausedCampaign(creds, spec);
+    expect(await client.createPausedCampaign(creds, spec)).toEqual(ids);
+    expect(client.statusOf(ids.campaignId)).toBe("DISABLE");
+  });
+
+  it("refuses to reuse a same-name campaign that is enabled, exactly like live (N4)", async () => {
     const client = createMockTikTokAdsClient();
     const ids = await client.createPausedCampaign(creds, spec);
     await client.launchCampaign(creds, ids);
-    expect(await client.createPausedCampaign(creds, spec)).toEqual(ids);
+    await expect(client.createPausedCampaign(creds, spec)).rejects.toMatchObject({
+      code: "invalid_input",
+      retryable: false,
+    });
+    // Nothing was touched by the refused call.
     expect(client.statusOf(ids.campaignId)).toBe("ENABLE");
+    await client.pauseCampaign(creds, ids);
+    expect(await client.createPausedCampaign(creds, spec)).toEqual(ids);
+  });
+
+  it("lists one EUR and one USD advertiser, each with currency and time zone (B1)", async () => {
+    const client = createMockTikTokAdsClient();
+    const token = await client.exchangeAuthCode({ code: MOCK_ADS_AUTH_CODE });
+    const advertisers = await client.listAdvertisers({ accessToken: token.accessToken });
+    expect(advertisers.map((a) => a.currency).sort()).toEqual(["EUR", "USD"]);
+    expect(advertisers.every((a) => a.timezone)).toBe(true);
+    expect(advertisers).toEqual(MOCK_ADVERTISERS);
+  });
+
+  it("updateBudget changes amounts only, never a status, and follows live's rules", async () => {
+    const client = createMockTikTokAdsClient();
+    const ids = await client.createPausedCampaign(creds, spec);
+    const group = ids.adGroups[0]!.adGroupId;
+    expect(client.budgetOf(group)).toBe(50);
+    await client.updateBudget(creds, {
+      ids,
+      budget: { mode: "daily", amount: 80, level: "ad_group" },
+    });
+    expect(client.budgetOf(group)).toBe(80);
+    const all = [ids.campaignId, group, ...ids.adGroups[0]!.adIds];
+    expect(all.every((x) => client.statusOf(x) === "DISABLE")).toBe(true);
+
+    // Launched: still never touches a status.
+    await client.launchCampaign(creds, ids);
+    await client.updateBudget(creds, {
+      ids,
+      budget: { mode: "daily", amount: 60, level: "ad_group" },
+    });
+    expect(all.every((x) => client.statusOf(x) === "ENABLE")).toBe(true);
+
+    for (const budget of [
+      { mode: "total", amount: 500, level: "ad_group" },
+      { mode: "daily", amount: 500, level: "campaign" },
+      { mode: "daily", amount: 10.005, level: "ad_group" },
+    ] as const) {
+      await expect(client.updateBudget(creds, { ids, budget })).rejects.toMatchObject({
+        code: "invalid_input",
+      });
+    }
+    await expect(
+      client.updateBudget(creds, {
+        ids: { campaignId: "999", adGroups: [{ adGroupId: "998", adIds: ["997"] }] },
+        budget: { mode: "daily", amount: 60, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("updateBudget refuses a value below TikTok's minimum for the advertiser currency", async () => {
+    const client = createMockTikTokAdsClient();
+    const usd = {
+      ...creds,
+      advertiserId: MOCK_ADVERTISERS.find((a) => a.currency === "USD")!.advertiserId,
+    };
+    const ids = await client.createPausedCampaign(usd, spec);
+    const floor = BUDGET_FLOORS.USD!.adGroupDaily;
+    await expect(
+      client.updateBudget(usd, {
+        ids,
+        budget: { mode: "daily", amount: floor - 1, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(client.budgetOf(ids.adGroups[0]!.adGroupId)).toBe(50);
+    await client.updateBudget(usd, {
+      ids,
+      budget: { mode: "daily", amount: floor, level: "ad_group" },
+    });
+    expect(client.budgetOf(ids.adGroups[0]!.adGroupId)).toBe(floor);
+
+    const cbo = await client.createPausedCampaign(usd, {
+      ...spec,
+      name: "CBO",
+      budget: { mode: "daily", amount: 100, level: "campaign" },
+    });
+    await expect(
+      client.updateBudget(usd, {
+        ids: cbo,
+        budget: { mode: "daily", amount: BUDGET_FLOORS.USD!.campaign - 1, level: "campaign" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
   it("rejects the same specs live would reject", async () => {
@@ -251,6 +347,16 @@ describe("tiktok ads mock: contract conformance", () => {
     expect(await createMockTikTokAdsClient().getHourlyStats(creds, input)).toEqual(stats);
     await expect(
       client.getHourlyStats(creds, { ...input, to: "2026-09-30T00:00:00.000Z" }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    // Bounded like live: at most STATS_MAX_WINDOW_HOURS per call.
+    await expect(
+      client.getHourlyStats(creds, {
+        ...input,
+        from: "2026-10-01T00:00:00.000Z",
+        to: new Date(
+          Date.parse("2026-10-01T00:00:00.000Z") + (STATS_MAX_WINDOW_HOURS + 1) * 3_600_000,
+        ).toISOString(),
+      }),
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 });
@@ -391,15 +497,49 @@ describe("tiktok ads live: auth and advertisers", () => {
     });
   });
 
-  it("lists advertisers even when advertiser/info fails", async () => {
+  it("never lists an advertiser without its currency (B1)", async () => {
     const fetch = vi.fn(async (url: string | URL | Request) =>
       String(url).includes("oauth2/advertiser/get")
         ? json({ code: 0, data: { list: [{ advertiser_id: 42, advertiser_name: "Acme" }] } })
         : json({ code: 40001, message: "no permission" }),
     );
+    await expect(live(fetch).listAdvertisers({ accessToken: "tok" })).rejects.toMatchObject({
+      code: "provider_error",
+    });
+
+    const noCurrency = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes("oauth2/advertiser/get")
+        ? json({ code: 0, data: { list: [{ advertiser_id: 42, advertiser_name: "Acme" }] } })
+        : json({ code: 0, data: { list: [{ advertiser_id: "42", timezone: "UTC" }] } }),
+    );
+    await expect(live(noCurrency).listAdvertisers({ accessToken: "tok" })).rejects.toMatchObject({
+      code: "provider_error",
+    });
+  });
+
+  it("in sandbox, reads advertiser/info from production when the sandbox host refuses the token", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("oauth2/advertiser/get")) {
+        return json({
+          code: 0,
+          data: { list: [{ advertiser_id: "42", advertiser_name: "Acme" }] },
+        });
+      }
+      if (u.startsWith(ADS_SANDBOX_BASE)) return json({ code: 40105, message: "bad token" });
+      return json({
+        code: 0,
+        data: { list: [{ advertiser_id: "42", currency: "USD", timezone: "America/New_York" }] },
+      });
+    });
     expect(await live(fetch).listAdvertisers({ accessToken: "tok" })).toEqual([
-      { advertiserId: "42", name: "Acme" },
+      { advertiserId: "42", name: "Acme", currency: "USD", timezone: "America/New_York" },
     ]);
+    const infoHosts = fetch.mock.calls
+      .map((c) => String((c as unknown[])[0]))
+      .filter((u) => u.includes("advertiser/info"))
+      .map((u) => new URL(u).origin);
+    expect(infoHosts).toEqual([new URL(ADS_SANDBOX_BASE).origin, new URL(ADS_PROD_BASE).origin]);
   });
 
   it("keeps int64 advertiser ids exact and prefers the IANA display time zone", async () => {
@@ -779,6 +919,115 @@ describe("tiktok ads live: launch and pause", () => {
   });
 });
 
+describe("tiktok ads live: updateBudget", () => {
+  const usdInfo = {
+    code: 0,
+    message: "OK",
+    data: {
+      list: [{ advertiser_id: creds.advertiserId, currency: "USD", timezone: "America/New_York" }],
+    },
+  };
+  const withModes = (campaignMode: string, groupMode: string) => ({
+    "GET advertiser/info/": usdInfo,
+    "GET campaign/get/": {
+      code: 0,
+      data: {
+        list: [{ campaign_id: createdIds.campaignId, budget_mode: campaignMode }],
+        page_info: { page: 1, total_page: 1 },
+      },
+    },
+    "GET adgroup/get/": {
+      code: 0,
+      data: {
+        list: [{ adgroup_id: createdIds.adGroups[0]!.adGroupId, budget_mode: groupMode }],
+        page_info: { page: 1, total_page: 1 },
+      },
+    },
+    "POST adgroup/update/": { code: 0, message: "OK", data: {} },
+    "POST campaign/update/": { code: 0, message: "OK", data: {} },
+  });
+  const posts = (calls: { method: string; path: string }[]) =>
+    calls.filter((c) => c.method === "POST").map((c) => c.path);
+
+  it("sets the ad group budget with adgroup/update and never sends a status", async () => {
+    const { fetch, calls } = fixtureFetch(withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"));
+    await live(fetch).updateBudget!(creds, {
+      ids: createdIds,
+      budget: { mode: "daily", amount: 75.5, level: "ad_group" },
+    });
+    expect(posts(calls)).toEqual(["adgroup/update/"]);
+    const body = calls.find((c) => c.path === "adgroup/update/")!.body;
+    expect(body).toEqual({
+      advertiser_id: creds.advertiserId,
+      adgroup_id: createdIds.adGroups[0]!.adGroupId,
+      budget: 75.5,
+    });
+    expect(JSON.stringify(calls.map((c) => c.body))).not.toContain("operation_status");
+  });
+
+  it("sets a CBO budget with campaign/update", async () => {
+    const { fetch, calls } = fixtureFetch(withModes("BUDGET_MODE_DAY", "BUDGET_MODE_DAY"));
+    await live(fetch).updateBudget!(creds, {
+      ids: createdIds,
+      budget: { mode: "daily", amount: 120, level: "campaign" },
+    });
+    expect(posts(calls)).toEqual(["campaign/update/"]);
+    expect(calls.find((c) => c.path === "campaign/update/")!.body).toEqual({
+      advertiser_id: creds.advertiserId,
+      campaign_id: createdIds.campaignId,
+      budget: 120,
+    });
+  });
+
+  it("refuses, before any write, a value below the minimum, a mode or level change", async () => {
+    const cases = [
+      // Under the USD ad group daily minimum.
+      [
+        withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"),
+        { mode: "daily", amount: BUDGET_FLOORS.USD!.adGroupDaily - 0.01, level: "ad_group" },
+      ],
+      // Under the USD campaign minimum.
+      [
+        withModes("BUDGET_MODE_DAY", "BUDGET_MODE_DAY"),
+        { mode: "daily", amount: BUDGET_FLOORS.USD!.campaign - 1, level: "campaign" },
+      ],
+      // Daily → total cannot be switched.
+      [
+        withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"),
+        { mode: "total", amount: 1000, level: "ad_group" },
+      ],
+      // Campaign-level budget on a campaign whose budget lives on its ad groups.
+      [
+        withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"),
+        { mode: "daily", amount: 100, level: "campaign" },
+      ],
+      // Ad group budget on a CBO campaign.
+      [
+        withModes("BUDGET_MODE_DAY", "BUDGET_MODE_DAY"),
+        { mode: "daily", amount: 100, level: "ad_group" },
+      ],
+    ] as const;
+    for (const [routes, budget] of cases) {
+      const { fetch, calls } = fixtureFetch(routes);
+      await expect(
+        live(fetch).updateBudget!(creds, { ids: createdIds, budget }),
+      ).rejects.toMatchObject({ code: "invalid_input", retryable: false });
+      expect(posts(calls)).toEqual([]);
+    }
+  });
+
+  it("refuses ids that are not part of the campaign", async () => {
+    const { fetch, calls } = fixtureFetch(withModes("BUDGET_MODE_INFINITE", "BUDGET_MODE_DAY"));
+    await expect(
+      live(fetch).updateBudget!(creds, {
+        ids: { campaignId: createdIds.campaignId, adGroups: [{ adGroupId: "123", adIds: [] }] },
+        budget: { mode: "daily", amount: 60, level: "ad_group" },
+      }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(posts(calls)).toEqual([]);
+  });
+});
+
 describe("tiktok ads live: getHourlyStats", () => {
   const input = {
     campaignId: "1812345678901234567",
@@ -834,6 +1083,45 @@ describe("tiktok ads live: getHourlyStats", () => {
     expect(JSON.parse(reports[0]!.query.filtering!)).toEqual([
       { field_name: "campaign_ids", filter_type: "IN", filter_value: '["1812345678901234567"]' },
     ]);
+  });
+
+  it("stays inside its time budget per campaign (S4)", async () => {
+    let t = Date.parse("2026-11-04T10:00:00.000Z");
+    // Every request takes 12 s of wall clock.
+    const { fetch, calls } = fixtureFetch({
+      "GET advertiser/info/": () => {
+        t += 12_000;
+        return fx.advertiser_info_paris;
+      },
+      "GET report/integrated/get/": () => {
+        t += 12_000;
+        return fx.report_page_2;
+      },
+    });
+    const client = live(fetch, { now: () => new Date(t) });
+    const err = await client
+      .getHourlyStats(creds, {
+        campaignId: input.campaignId,
+        from: "2026-10-01T00:00:00.000Z",
+        to: "2026-10-03T23:00:00.000Z",
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TimeBudgetError);
+    expect((err as TimeBudgetError).retryable).toBe(true);
+    // No request started after the budget ran out.
+    expect(calls.length).toBeLessThanOrEqual(Math.ceil(STATS_CALL_BUDGET_MS / 12_000));
+  });
+
+  it("refuses a window longer than STATS_MAX_WINDOW_HOURS before any request", async () => {
+    const { fetch, calls } = fixtureFetch({});
+    await expect(
+      live(fetch).getHourlyStats(creds, {
+        campaignId: input.campaignId,
+        from: "2026-10-01T00:00:00.000Z",
+        to: "2026-10-05T01:00:00.000Z",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(calls).toEqual([]);
   });
 
   it("splits a window crossing local midnight into one query per local day", () => {

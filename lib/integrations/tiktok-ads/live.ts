@@ -25,7 +25,21 @@ import {
   TIKTOK_ADS_PROVIDER,
   type TikTokAdsConfig,
 } from "./config";
-import { adsRequest, withRetry, type AdsRequest } from "./http";
+import {
+  adGroupBudgetBody,
+  assertBudgetBodyHasNoStatus,
+  budgetModeFor,
+  campaignBudgetBody,
+  validateBudgetUpdate,
+} from "./budget";
+import {
+  adsRequest,
+  REQUEST_TIMEOUT_MS,
+  TimeBudgetError,
+  withRetry,
+  type AdsRequest,
+} from "./http";
+import { STATS_CALL_BUDGET_MS, STATS_MAX_WINDOW_HOURS } from "./limits";
 import { getRateLimiter, keyForSecret, type RateLimiter } from "./rate-limit";
 import {
   foldHourlyStats,
@@ -44,6 +58,7 @@ import {
   campaignCreateBody,
   CreatedEnabledError,
   identityKey,
+  TOTAL_BUDGET_DAYS,
   validateSpecForTikTok,
   type ResolvedIdentity,
 } from "./spec";
@@ -58,6 +73,7 @@ import {
  *   identity/get, identity/create (CUSTOMIZED_USER)
  *   tt_video/authorize, tt_video/info (Spark Ads, AUTH_CODE)
  *   campaign|adgroup|ad /create, /get, /status/update
+ *   campaign/update, adgroup/update (budget only, see budget.ts)
  *   report/integrated/get
  *
  * Every call takes an "ads.api" token per advertiser (Upstash), and is
@@ -113,6 +129,12 @@ const advertiserInfoDataSchema = z.object({
     )
     .default([]),
 });
+
+type AdvertiserInfo = z.infer<typeof advertiserInfoDataSchema>["list"][number];
+
+function validCurrency(c: string | undefined): string | undefined {
+  return c && /^[A-Z]{3}$/.test(c) ? c : undefined;
+}
 
 const pageInfoSchema = z
   .object({ page: z.number().optional(), total_page: z.number().optional() })
@@ -199,6 +221,23 @@ const adListSchema = z.object({
   page_info: pageInfoSchema,
 });
 
+const campaignBudgetListSchema = z.object({
+  list: z
+    .array(
+      z.object({
+        campaign_id: id,
+        budget_mode: z.string().optional(),
+        budget_optimize_on: z.boolean().optional(),
+      }),
+    )
+    .default([]),
+  page_info: pageInfoSchema,
+});
+const adGroupBudgetListSchema = z.object({
+  list: z.array(z.object({ adgroup_id: id, budget_mode: z.string().optional() })).default([]),
+  page_info: pageInfoSchema,
+});
+
 const campaignCreateDataSchema = z.object({ campaign_id: id });
 const adGroupCreateDataSchema = z.object({ adgroup_id: id });
 const adCreateDataSchema = z
@@ -227,18 +266,26 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
   const sleep = options.sleep ?? realSleep;
   const limiter = () => options.rateLimiter ?? getRateLimiter(TIKTOK_ADS_PROVIDER);
   const config = (): TikTokAdsConfig => readAdsConfig(env);
-  const timezones = new Map<string, string>();
+  const advertisers = new Map<string, { timeZone: string; currency: string | undefined }>();
 
   /** One rate-limited, retried Marketing API call for an advertiser. */
   async function call<T>(
     creds: TikTokAdsCredentials,
-    req: Omit<AdsRequest, "url" | "accessToken"> & { path: string },
+    req: Omit<AdsRequest, "url" | "accessToken" | "timeoutMs"> & { path: string },
     schema: z.ZodType<T>,
     idempotent: boolean,
+    deadline?: number,
   ): Promise<T> {
     const cfg = config();
-    return withRetry({ attempts: ATTEMPTS, idempotent, sleep }, async () => {
-      await limiter().take("ads.api", `adv:${creds.advertiserId}`);
+    const clock = () => now().getTime();
+    return withRetry({ attempts: ATTEMPTS, idempotent, sleep, deadline, clock }, async () => {
+      // Rate-limit wait and request timeout both stay inside the deadline.
+      const left = deadline === undefined ? undefined : deadline - clock();
+      if (left !== undefined && left <= 0) throw new TimeBudgetError();
+      if (left === undefined) await limiter().take("ads.api", `adv:${creds.advertiserId}`);
+      else await limiter().take("ads.api", `adv:${creds.advertiserId}`, Math.min(5_000, left));
+      const remaining = deadline === undefined ? undefined : deadline - clock();
+      if (remaining !== undefined && remaining <= 0) throw new TimeBudgetError();
       return adsRequest(
         fetchImpl,
         {
@@ -247,6 +294,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
           accessToken: creds.accessToken,
           query: req.query,
           body: req.body,
+          timeoutMs: remaining === undefined ? undefined : Math.min(REQUEST_TIMEOUT_MS, remaining),
         },
         schema,
       );
@@ -275,10 +323,11 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
 
   async function advertiserDetails(
     cfg: TikTokAdsConfig,
+    base: string,
     accessToken: string,
     ids: string[],
-  ): Promise<Map<string, z.infer<typeof advertiserInfoDataSchema>["list"][number]>> {
-    const details = new Map<string, z.infer<typeof advertiserInfoDataSchema>["list"][number]>();
+  ): Promise<Map<string, AdvertiserInfo>> {
+    const details = new Map<string, AdvertiserInfo>();
     // advertiser/info accepts up to 100 ids per call.
     for (const batch of chunk(ids, 100)) {
       await limiter().take("ads.api", `app:${cfg.appId}`);
@@ -286,7 +335,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
         fetchImpl,
         {
           method: "GET",
-          url: `${resourceBase(cfg)}/advertiser/info/`,
+          url: `${base}/advertiser/info/`,
           accessToken,
           query: {
             advertiser_ids: batch,
@@ -300,9 +349,15 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
     return details;
   }
 
-  /** Advertiser IANA time zone for reports; UTC when TikTok gives none. */
-  async function advertiserTimeZone(creds: TikTokAdsCredentials): Promise<string> {
-    const cached = timezones.get(creds.advertiserId);
+  /**
+   * Advertiser IANA time zone (UTC when TikTok gives none) and currency
+   * (undefined when TikTok gives none), cached per advertiser.
+   */
+  async function advertiserInfo(
+    creds: TikTokAdsCredentials,
+    deadline?: number,
+  ): Promise<{ timeZone: string; currency: string | undefined }> {
+    const cached = advertisers.get(creds.advertiserId);
     if (cached) return cached;
     const data = await call(
       creds,
@@ -311,16 +366,20 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
         path: "advertiser/info/",
         query: {
           advertiser_ids: [creds.advertiserId],
-          fields: ["advertiser_id", "timezone", "display_timezone"],
+          fields: ["advertiser_id", "currency", "timezone", "display_timezone"],
         },
       },
       advertiserInfoDataSchema,
       true,
+      deadline,
     );
     const a = data.list.find((x) => x.advertiser_id === creds.advertiserId) ?? data.list[0];
-    const tz = [a?.display_timezone, a?.timezone].find(isValidTimeZone) ?? "UTC";
-    timezones.set(creds.advertiserId, tz);
-    return tz;
+    const info = {
+      timeZone: [a?.display_timezone, a?.timezone].find(isValidTimeZone) ?? "UTC",
+      currency: validCurrency(a?.currency),
+    };
+    advertisers.set(creds.advertiserId, info);
+    return info;
   }
 
   /* ---------------------------- identities ---------------------------- */
@@ -482,6 +541,18 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
       adGroupListSchema,
     );
 
+  const adGroupsWithBudget = (creds: TikTokAdsCredentials, campaignId: string) =>
+    getAll(
+      creds,
+      "adgroup/get/",
+      {
+        advertiser_id: creds.advertiserId,
+        filtering: { campaign_ids: [campaignId] },
+        fields: ["adgroup_id", "budget_mode"],
+      },
+      adGroupBudgetListSchema,
+    );
+
   const adsOf = (creds: TikTokAdsCredentials, campaignId: string) =>
     getAll(
       creds,
@@ -622,12 +693,31 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
       );
       const ids = data.list.map((a) => a.advertiser_id);
 
-      // Currency and timezone are nice to have: never fail the connection on them.
-      let details = new Map<string, z.infer<typeof advertiserInfoDataSchema>["list"][number]>();
-      try {
-        details = await advertiserDetails(cfg, accessToken, ids);
-      } catch {
-        // ignore: e.g. sandbox host with a production token
+      if (ids.length === 0) return [];
+
+      // The currency is required (B1: budgets are read in the advertiser's
+      // currency, and an account whose currency differs from the brand's is
+      // refused). advertiser/info on the resource host first; in sandbox mode
+      // the OAuth token is a production token, so fall back to production
+      // (a read).
+      let details = new Map<string, AdvertiserInfo>();
+      let lastError: unknown;
+      for (const base of cfg.sandbox ? [resourceBase(cfg), ADS_PROD_BASE] : [ADS_PROD_BASE]) {
+        try {
+          details = await advertiserDetails(cfg, base, accessToken, ids);
+          if (ids.every((x) => validCurrency(details.get(x)?.currency))) break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      const missing = ids.filter((x) => !validCurrency(details.get(x)?.currency));
+      if (missing.length > 0) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "provider_error",
+          `TikTok did not return the currency of advertiser ${missing.join(", ")}; try connecting again.`,
+          { cause: lastError },
+        );
       }
 
       return data.list.map((a) => {
@@ -636,7 +726,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
         return tiktokAdvertiserSchema.parse({
           advertiserId: a.advertiser_id,
           name: a.advertiser_name || d?.name || a.advertiser_id,
-          currency: d?.currency && /^[A-Z]{3}$/.test(d.currency) ? d.currency : undefined,
+          currency: validCurrency(d?.currency),
           timezone: tz ?? (d?.timezone || undefined),
         });
       });
@@ -828,6 +918,91 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
       await disableAll(creds, ids);
     },
 
+    async updateBudget(rawCreds, input): Promise<void> {
+      const creds = tiktokAdsCredentialsSchema.parse(rawCreds);
+      const ids = campaignIdsSchema.parse(input.ids);
+      const { currency } = await advertiserInfo(creds);
+      const budget = validateBudgetUpdate(input.budget, currency, TOTAL_BUDGET_DAYS);
+      const mode = budgetModeFor(budget.mode);
+
+      // The entities must belong to the campaign, carry the budget at the
+      // requested level and keep their budget mode (TikTok cannot switch it).
+      const [campaigns, groups] = await Promise.all([
+        getAll(
+          creds,
+          "campaign/get/",
+          {
+            advertiser_id: creds.advertiserId,
+            filtering: { campaign_ids: [ids.campaignId] },
+            fields: ["campaign_id", "budget_mode", "budget_optimize_on"],
+          },
+          campaignBudgetListSchema,
+        ),
+        adGroupsWithBudget(creds, ids.campaignId),
+      ]);
+      const camp = campaigns.find((c) => c.campaign_id === ids.campaignId);
+      const wanted = ids.adGroups.map((g) => g.adGroupId);
+      const missing = [
+        ...(camp ? [] : [ids.campaignId]),
+        ...wanted.filter((g) => !groups.some((x) => x.adgroup_id === g)),
+      ];
+      if (!camp || missing.length > 0) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "not_found",
+          `Entity ${missing[0]} is not part of campaign ${ids.campaignId}.`,
+          { retryable: false },
+        );
+      }
+      if (budget.level === "ad_group" && wanted.length === 0) {
+        throw new IntegrationError(TIKTOK_ADS_PROVIDER, "invalid_input", "No ad group to update.", {
+          retryable: false,
+        });
+      }
+      const cbo = camp.budget_mode !== undefined && camp.budget_mode !== "BUDGET_MODE_INFINITE";
+      if ((budget.level === "campaign") !== cbo && camp.budget_mode !== undefined) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          budget.level === "campaign"
+            ? "This campaign's budget is set on its ad groups, not on the campaign."
+            : "This campaign's budget is set on the campaign, not on its ad groups.",
+          { retryable: false },
+        );
+      }
+      const modes =
+        budget.level === "campaign"
+          ? [camp.budget_mode]
+          : groups.filter((g) => wanted.includes(g.adgroup_id)).map((g) => g.budget_mode);
+      if (modes.some((m) => m !== undefined && m !== mode)) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          `The budget mode cannot change after creation (requested ${budget.mode}).`,
+          { retryable: false },
+        );
+      }
+
+      const updates =
+        budget.level === "campaign"
+          ? [
+              {
+                path: "campaign/update/",
+                body: campaignBudgetBody(creds.advertiserId, ids.campaignId, budget.amount),
+              },
+            ]
+          : wanted.map((g) => ({
+              path: "adgroup/update/",
+              body: adGroupBudgetBody(creds.advertiserId, g, budget.amount),
+            }));
+      for (const u of updates) {
+        // Never a status field: a budget change cannot enable anything.
+        assertBudgetBodyHasNoStatus(u.body);
+        // Setting an absolute amount is idempotent: safe to retry.
+        await call(creds, { method: "POST", path: u.path, body: u.body }, anyData, true);
+      }
+    },
+
     async getHourlyStats(rawCreds, input): Promise<HourlyStat[]> {
       const creds = tiktokAdsCredentialsSchema.parse(rawCreds);
       const { campaignId, from, to } = z
@@ -835,7 +1010,18 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
         .parse(input);
       const { start, end } = statsWindow(from, to);
       if (end <= start) return [];
-      const tz = await advertiserTimeZone(creds);
+      if (end - start > STATS_MAX_WINDOW_HOURS * 3_600_000) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          `A stats window is at most ${STATS_MAX_WINDOW_HOURS} hours.`,
+          { retryable: false },
+        );
+      }
+      // Bounded per campaign: every call (rate-limit wait, request, retries)
+      // must fit in STATS_CALL_BUDGET_MS, else TimeBudgetError (retryable).
+      const deadline = now().getTime() + STATS_CALL_BUDGET_MS;
+      const tz = (await advertiserInfo(creds, deadline)).timeZone;
 
       const rows: ReportRow[] = [];
       for (const date of localDatesFor(tz, start, end)) {
@@ -866,6 +1052,7 @@ export function createLiveTikTokAdsClient(options: LiveTikTokAdsOptions = {}): T
             },
             reportDataSchema,
             true,
+            deadline,
           );
           rows.push(
             ...data.list.filter(

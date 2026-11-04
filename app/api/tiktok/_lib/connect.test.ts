@@ -178,6 +178,40 @@ describe("ads callback", () => {
     expect(await ctx.db.count(tiktokAdConnection)).toBe(0);
     expect(await ctx.db.count(auditLog)).toBe(0);
   });
+
+  it("passes each advertiser's currency to the save path and refuses one without (B1)", async () => {
+    const ctx = ctxFor("media_buyer");
+    const mock = createMockTikTokAdsClient();
+    const seen: (string | undefined)[] = [];
+    await completeAdsConnection(ctx, {
+      flow: roundTrip("tiktok_ads"),
+      code: MOCK_ADS_AUTH_CODE,
+      client: {
+        ...mock,
+        listAdvertisers: async (input) => {
+          const list = await mock.listAdvertisers(input);
+          seen.push(...list.map((a) => a.currency));
+          return list;
+        },
+      },
+    });
+    expect(seen.sort()).toEqual(["EUR", "USD"]);
+
+    await db.delete(tiktokAdConnection);
+    await db.delete(auditLog);
+    await expect(
+      completeAdsConnection(ctx, {
+        flow: roundTrip("tiktok_ads"),
+        code: MOCK_ADS_AUTH_CODE,
+        client: {
+          ...mock,
+          listAdvertisers: async (input) =>
+            (await mock.listAdvertisers(input)).map((a) => ({ ...a, currency: undefined })),
+        },
+      }),
+    ).rejects.toMatchObject({ code: "provider_error" });
+    expect(await ctx.db.count(tiktokAdConnection)).toBe(0);
+  });
 });
 
 describe("login kit callback", () => {

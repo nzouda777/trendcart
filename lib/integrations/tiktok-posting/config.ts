@@ -26,6 +26,18 @@ export const OPEN_API_BASE = "https://open.tiktokapis.com/v2";
 /** user.info.basic: profile; video.publish: Direct Post + creator info; video.upload: inbox drafts. */
 export const LOGIN_SCOPES = ["user.info.basic", "video.publish", "video.upload"] as const;
 
+/*
+ * Publish concurrency (N10). One value shared with lib/services/videos.ts:
+ * - PUBLISH_CLAIM_STALE_MS: a tiktok_post left "pending" longer than this
+ *   may be claimed again (the service's STALE_POST_CLAIM_MS must equal it).
+ * - PUBLISH_LOCK_TTL_MS: live's Upstash lock per (profile token, source).
+ *   One minute shorter than the claim, so the lock has always expired when a
+ *   claim becomes stale, and longer than any function that runs a publish
+ *   (maxDuration 300 s), so a live publish never outlives its lock.
+ */
+export const PUBLISH_CLAIM_STALE_MS = 10 * 60_000;
+export const PUBLISH_LOCK_TTL_MS = PUBLISH_CLAIM_STALE_MS - 60_000;
+
 export type TikTokLoginConfig = {
   clientKey: string;
   clientSecret: string;

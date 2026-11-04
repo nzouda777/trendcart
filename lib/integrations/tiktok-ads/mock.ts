@@ -13,9 +13,11 @@ import {
   type TikTokAdvertiser,
 } from "@/lib/domain/contracts";
 
+import { validateBudgetUpdate } from "./budget";
 import { TIKTOK_ADS_PROVIDER } from "./config";
+import { STATS_MAX_WINDOW_HOURS } from "./limits";
 import { statsWindow } from "./report";
-import { validateSpecForTikTok } from "./spec";
+import { TOTAL_BUDGET_DAYS, validateSpecForTikTok } from "./spec";
 
 /*
  * Deterministic in-memory TikTok Ads. Never touches the network.
@@ -26,8 +28,14 @@ import { validateSpecForTikTok } from "./spec";
  *
  * Mirrors live: specs go through the same validateSpecForTikTok (so a spec
  * the live API would reject fails here too), re-creating the same spec
- * returns the same ids without touching their status (live reuses by name),
- * launch needs ids created here first, and stats are one row per UTC hour.
+ * returns the same ids without touching their status (live reuses by name)
+ * but refuses a same-name campaign that is enabled (like live), launch needs
+ * ids created here first, budget updates follow the same minimums and
+ * mode/level rules as live and never touch a status, and stats are one row
+ * per UTC hour (window capped like live).
+ *
+ * Advertisers: one EUR and one USD account, so the brand-currency match and
+ * mismatch paths (B1) are both testable. Floors apply to USD only (budget.ts).
  */
 
 export const MOCK_ADS_AUTH_CODE = "mock-ads-auth-code";
@@ -67,12 +75,24 @@ const HOUR_MS = 3_600_000;
 export type MockEntityStatus = "DISABLE" | "ENABLE";
 
 export interface MockTikTokAdsClient extends TikTokAdsClient {
+  updateBudget: NonNullable<TikTokAdsClient["updateBudget"]>;
   /** Test/demo helper: operation status of a campaign, ad group or ad id. */
   statusOf(id: string): MockEntityStatus | undefined;
+  /** Test/demo helper: budget amount carried by a campaign or ad group id. */
+  budgetOf(id: string): number | undefined;
 }
+
+type MockBudget = {
+  mode: "daily" | "total";
+  level: "campaign" | "ad_group";
+  /** Amount per entity that carries it (the campaign, or each ad group). */
+  amounts: Map<string, number>;
+};
 
 export function createMockTikTokAdsClient(): MockTikTokAdsClient {
   const statuses = new Map<string, MockEntityStatus>();
+  /** Budget per campaign id. */
+  const budgets = new Map<string, MockBudget>();
 
   const tokenFor = (code: string) => `mock-ads-token-${digest("ads", code).slice(0, 24)}`;
 
@@ -129,6 +149,15 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
       const c = tiktokAdsCredentialsSchema.parse(creds);
       const spec = validateSpecForTikTok(rawSpec);
       const campaignId = numericId("17", 19, c.advertiserId, spec.name);
+      // Like live: an enabled campaign of the same name is never reused.
+      if (statuses.get(campaignId) === "ENABLE") {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          `Campaign "${spec.name}" already exists and is enabled; it will not be reused as a paused campaign.`,
+          { retryable: false },
+        );
+      }
       const ids = campaignIdsSchema.parse({
         campaignId,
         adGroups: spec.adGroups.map((g, gi) => {
@@ -147,6 +176,15 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
       ]) {
         // Like live's name lookup: an existing entity keeps its status.
         if (!statuses.has(id)) statuses.set(id, "DISABLE");
+      }
+      if (!budgets.has(campaignId)) {
+        const carriers =
+          spec.budget.level === "campaign" ? [campaignId] : ids.adGroups.map((g) => g.adGroupId);
+        budgets.set(campaignId, {
+          mode: spec.budget.mode,
+          level: spec.budget.level,
+          amounts: new Map(carriers.map((x) => [x, spec.budget.amount])),
+        });
       }
       return ids;
     },
@@ -170,12 +208,63 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
       for (const id of assertKnown(campaignIdsSchema.parse(rawIds))) statuses.set(id, "DISABLE");
     },
 
+    async updateBudget(creds, input) {
+      const c = tiktokAdsCredentialsSchema.parse(creds);
+      const ids = campaignIdsSchema.parse(input.ids);
+      const currency = MOCK_ADVERTISERS.find((a) => a.advertiserId === c.advertiserId)?.currency;
+      const budget = validateBudgetUpdate(input.budget, currency, TOTAL_BUDGET_DAYS);
+      assertKnown(ids);
+      const current = budgets.get(ids.campaignId);
+      if (!current) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "not_found",
+          `Unknown mock campaign ${ids.campaignId}.`,
+        );
+      }
+      if (current.level !== budget.level) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          budget.level === "campaign"
+            ? "This campaign's budget is set on its ad groups, not on the campaign."
+            : "This campaign's budget is set on the campaign, not on its ad groups.",
+          { retryable: false },
+        );
+      }
+      if (current.mode !== budget.mode) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          `The budget mode cannot change after creation (requested ${budget.mode}).`,
+          { retryable: false },
+        );
+      }
+      const targets =
+        budget.level === "campaign" ? [ids.campaignId] : ids.adGroups.map((g) => g.adGroupId);
+      if (targets.length === 0) {
+        throw new IntegrationError(TIKTOK_ADS_PROVIDER, "invalid_input", "No ad group to update.", {
+          retryable: false,
+        });
+      }
+      // Amounts only: statuses are never touched.
+      for (const t of targets) current.amounts.set(t, budget.amount);
+    },
+
     async getHourlyStats(creds, input) {
       tiktokAdsCredentialsSchema.parse(creds);
       const { campaignId, from, to } = z
         .object({ campaignId: z.string().min(1), from: z.iso.datetime(), to: z.iso.datetime() })
         .parse(input);
       const { start, end } = statsWindow(from, to);
+      if (end - start > STATS_MAX_WINDOW_HOURS * HOUR_MS) {
+        throw new IntegrationError(
+          TIKTOK_ADS_PROVIDER,
+          "invalid_input",
+          `A stats window is at most ${STATS_MAX_WINDOW_HOURS} hours.`,
+          { retryable: false },
+        );
+      }
       // A campaign never launched in this mock spends nothing.
       const neverLaunched = statuses.get(campaignId) === "DISABLE";
       const stats: HourlyStat[] = [];
@@ -200,6 +289,14 @@ export function createMockTikTokAdsClient(): MockTikTokAdsClient {
 
     statusOf(id) {
       return statuses.get(id);
+    },
+
+    budgetOf(id) {
+      for (const b of budgets.values()) {
+        const amount = b.amounts.get(id);
+        if (amount !== undefined) return amount;
+      }
+      return undefined;
     },
   };
 }

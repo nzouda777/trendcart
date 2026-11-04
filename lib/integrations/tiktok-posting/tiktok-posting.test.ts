@@ -12,10 +12,28 @@ import { UnsafeActionError } from "../tiktok-ads/safety";
 
 import fx from "./__fixtures__/content-posting-v2.json";
 import { contentRange, MB, planChunks } from "./chunks";
-import { isPostingAudited } from "./config";
+import { isPostingAudited, PUBLISH_CLAIM_STALE_MS, PUBLISH_LOCK_TTL_MS } from "./config";
 import { mapPostingError } from "./http";
 import { createLiveTikTokPostingClient } from "./live";
 import { createMockTikTokPostingClient, MOCK_LOGIN_AUTH_CODE } from "./mock";
+
+/*
+ * The default source fetch is the SSRF-guarded client from tiktok-data/http.
+ * Replaced here by a recorder: tests that inject `sourceFetch` never reach it.
+ */
+const guarded = vi.hoisted(() => ({
+  ctxs: [] as unknown[],
+  calls: [] as { url: string; method: string }[],
+}));
+vi.mock("@/lib/integrations/tiktok-data/http", () => ({
+  createHttpClient: (ctx: unknown) => {
+    guarded.ctxs.push(ctx);
+    return async (url: string | URL, init?: { method?: string }) => {
+      guarded.calls.push({ url: String(url), method: init?.method ?? "GET" });
+      return new Response(null, { status: 404 });
+    };
+  },
+}));
 
 const oauth = {
   state: "s".repeat(32),
@@ -327,6 +345,7 @@ function postingLive(
   return createLiveTikTokPostingClient({
     env: { TIKTOK_LOGIN_CLIENT_KEY: "ck", TIKTOK_LOGIN_CLIENT_SECRET: "cs" },
     fetch,
+    sourceFetch: fetch,
     rateLimiter: extra.rateLimiter ?? noopRateLimiter,
     sleep: async () => {},
     allowStubbedSideEffectsUnderTest: extra.optIn ?? true,
@@ -488,6 +507,74 @@ describe("tiktok posting live: publishVideoFromUrl (stubbed transport)", () => {
       "posting.creator_info",
       "posting.init",
     ]);
+  });
+});
+
+describe("tiktok posting live: source fetch safety (N2) and lock TTL (N10)", () => {
+  it("refuses a non-https source or one with credentials before any request", async () => {
+    for (const sourceUrl of [
+      "http://cdn.shopify.com/v.mp4",
+      "http://169.254.169.254/latest/meta-data/v.mp4",
+      "file:///etc/passwd",
+      "https://user:pass@cdn.shopify.com/v.mp4",
+    ]) {
+      const { fetch } = postingStub({});
+      const sourceFetch = vi.fn();
+      await expect(
+        createLiveTikTokPostingClient({
+          env: { TIKTOK_LOGIN_CLIENT_KEY: "ck", TIKTOK_LOGIN_CLIENT_SECRET: "cs" },
+          fetch,
+          sourceFetch,
+          rateLimiter: noopRateLimiter,
+          allowStubbedSideEffectsUnderTest: true,
+        }).publishVideoFromUrl({ ...publishInput, sourceUrl }),
+      ).rejects.toMatchObject({ code: "invalid_input", retryable: false });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(sourceFetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reads the source through the SSRF-guarded client by default, never the TikTok fetch", async () => {
+    guarded.ctxs.length = 0;
+    guarded.calls.length = 0;
+    const { fetch, calls } = postingStub({});
+    const client = createLiveTikTokPostingClient({
+      env: { TIKTOK_LOGIN_CLIENT_KEY: "ck", TIKTOK_LOGIN_CLIENT_SECRET: "cs" },
+      fetch,
+      rateLimiter: noopRateLimiter,
+      sleep: async () => {},
+      allowStubbedSideEffectsUnderTest: true,
+    });
+    // The recorder answers 404: the publish stops at the probe, before init.
+    await expect(client.publishVideoFromUrl(publishInput)).rejects.toMatchObject({
+      code: "not_found",
+    });
+    expect(guarded.ctxs).toEqual([{ proxyUrl: undefined }]);
+    expect(guarded.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      `HEAD ${SOURCE}`,
+      `GET ${SOURCE}`,
+    ]);
+    expect(calls.some((c) => c.url === SOURCE)).toBe(false);
+    expect(calls.some((c) => c.url.endsWith("/video/init/"))).toBe(false);
+  });
+
+  it("holds the publish lock for PUBLISH_LOCK_TTL_MS, shorter than the stale claim", async () => {
+    // Longer than any function running a publish (maxDuration 300 s), and
+    // expired before the service may take a pending claim over.
+    expect(PUBLISH_LOCK_TTL_MS).toBeGreaterThan(300_000);
+    expect(PUBLISH_LOCK_TTL_MS).toBeLessThan(PUBLISH_CLAIM_STALE_MS);
+    const ttls: number[] = [];
+    const { fetch } = postingStub({ size: 3 * MB });
+    await postingLive(fetch, {
+      rateLimiter: {
+        take: async () => {},
+        withLock: async (_k, ttl, fn) => {
+          ttls.push(ttl);
+          return fn();
+        },
+      },
+    }).publishVideoFromUrl(publishInput);
+    expect(ttls).toEqual([PUBLISH_LOCK_TTL_MS]);
   });
 });
 

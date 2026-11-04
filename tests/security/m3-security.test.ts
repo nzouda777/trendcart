@@ -298,44 +298,41 @@ describe("video sources", () => {
     expect(gqlBodies.some((b) => b.includes("stagedUploadsCreate"))).toBe(false);
   });
 
-  // NICE-TO-HAVE N2: the posting source fetch (HEAD / Range GETs) uses the
-  // plain fetch with no host or scheme check. The URL is the stored Shopify
-  // file URL, so this is defence in depth.
-  it.fails(
-    "live posting refuses a non-Shopify-CDN or non-https source before fetching it",
-    async () => {
-      const seen: string[] = [];
-      const client = createLiveTikTokPostingClient({
-        env: { TIKTOK_LOGIN_CLIENT_KEY: "k", TIKTOK_LOGIN_CLIENT_SECRET: "s" },
-        rateLimiter: noopRateLimiter,
-        allowStubbedSideEffectsUnderTest: true,
-        sleep: async () => undefined,
-        fetch: (async (input: RequestInfo | URL) => {
-          const url = String(input);
-          seen.push(url);
-          if (url.includes("creator_info")) {
-            return new Response(
-              JSON.stringify({
-                data: { privacy_level_options: ["SELF_ONLY"], creator_nickname: "qa" },
-                error: { code: "ok", message: "" },
-              }),
-              { status: 200, headers: { "content-type": "application/json" } },
-            );
-          }
-          return new Response(null, { status: 404 });
-        }) as typeof fetch,
-      });
-      await failure(
-        client.publishVideoFromUrl({
-          accessToken: "act.qa",
-          sourceUrl: "http://169.254.169.254/latest/meta-data/v.mp4",
-          caption: "x",
-          privacyLevel: "SELF_ONLY",
-        }),
-      );
-      expect(seen.some((u) => u.includes("169.254.169.254"))).toBe(false);
-    },
-  );
+  // NICE-TO-HAVE N2 (fixed): the posting source must be https (no
+  // credentials), checked before any request, and the HEAD / Range GETs go
+  // through the SSRF-guarded client.
+  it("live posting refuses a non-Shopify-CDN or non-https source before fetching it", async () => {
+    const seen: string[] = [];
+    const client = createLiveTikTokPostingClient({
+      env: { TIKTOK_LOGIN_CLIENT_KEY: "k", TIKTOK_LOGIN_CLIENT_SECRET: "s" },
+      rateLimiter: noopRateLimiter,
+      allowStubbedSideEffectsUnderTest: true,
+      sleep: async () => undefined,
+      fetch: (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seen.push(url);
+        if (url.includes("creator_info")) {
+          return new Response(
+            JSON.stringify({
+              data: { privacy_level_options: ["SELF_ONLY"], creator_nickname: "qa" },
+              error: { code: "ok", message: "" },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch,
+    });
+    await failure(
+      client.publishVideoFromUrl({
+        accessToken: "act.qa",
+        sourceUrl: "http://169.254.169.254/latest/meta-data/v.mp4",
+        caption: "x",
+        privacyLevel: "SELF_ONLY",
+      }),
+    );
+    expect(seen.some((u) => u.includes("169.254.169.254"))).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -488,7 +485,7 @@ describe("theme template writes", () => {
   // NICE-TO-HAVE N5: Liquid output tags survive in AI-written text settings.
   // JSON templates resolve "{{ ... }}" as dynamic sources, so a prompt-injected
   // listing could make the page print store data (metafields, shop fields).
-  it.fails("AI-written text settings carry no Liquid output or tag syntax", () => {
+  it("AI-written text settings carry no Liquid output or tag syntax", () => {
     for (const type of ["text", "inline_richtext", "richtext", "textarea"] as const) {
       const value = settingValue(
         { id: "t", type, label: "T" },

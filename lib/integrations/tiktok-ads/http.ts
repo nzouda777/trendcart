@@ -79,7 +79,11 @@ export type AdsRequest = {
   /** GET params; arrays and objects are JSON-encoded as the API expects. */
   query?: Record<string, unknown>;
   body?: unknown;
+  /** Per-request timeout; defaults to 20 s. */
+  timeoutMs?: number;
 };
+
+export const REQUEST_TIMEOUT_MS = 20_000;
 
 export async function adsRequest<T>(
   fetchImpl: typeof fetch,
@@ -101,7 +105,7 @@ export async function adsRequest<T>(
       method: req.method,
       headers,
       body: req.body === undefined ? undefined : JSON.stringify(req.body),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(req.timeoutMs ?? REQUEST_TIMEOUT_MS),
     });
   } catch (cause) {
     throw new IntegrationError(TIKTOK_ADS_PROVIDER, "provider_error", "TikTok Ads unreachable.", {
@@ -167,7 +171,21 @@ export type RetryPolicy = {
   idempotent: boolean;
   sleep?: (ms: number) => Promise<void>;
   baseDelayMs?: number;
+  /**
+   * Wall-clock deadline (epoch ms): no attempt starts, and no backoff sleeps,
+   * past it. The call then fails retryably with a time-budget error.
+   */
+  deadline?: number;
+  clock?: () => number;
 };
+
+/** A call that ran out of its wall-clock budget (retry later, e.g. next cron run). */
+export class TimeBudgetError extends IntegrationError {
+  constructor(message = "TikTok Ads call ran out of its time budget.") {
+    super(TIKTOK_ADS_PROVIDER, "provider_error", message, { retryable: true });
+    this.name = "TimeBudgetError";
+  }
+}
 
 export function isRetryable(error: unknown, idempotent: boolean): boolean {
   if (!(error instanceof IntegrationError)) return false;
@@ -179,12 +197,16 @@ export function isRetryable(error: unknown, idempotent: boolean): boolean {
 export async function withRetry<T>(policy: RetryPolicy, fn: () => Promise<T>): Promise<T> {
   const sleep = policy.sleep ?? realSleep;
   const base = policy.baseDelayMs ?? 500;
+  const clock = policy.clock ?? Date.now;
   for (let attempt = 1; ; attempt++) {
+    if (policy.deadline !== undefined && clock() >= policy.deadline) throw new TimeBudgetError();
     try {
       return await fn();
     } catch (error) {
       if (attempt >= policy.attempts || !isRetryable(error, policy.idempotent)) throw error;
-      await sleep(base * 2 ** (attempt - 1));
+      const delay = base * 2 ** (attempt - 1);
+      if (policy.deadline !== undefined && clock() + delay >= policy.deadline) throw error;
+      await sleep(delay);
     }
   }
 }

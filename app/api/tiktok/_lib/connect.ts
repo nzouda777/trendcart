@@ -63,6 +63,17 @@ export async function completeAdsConnection(
       retryable: false,
     });
   }
+  // B1: budgets are read in the advertiser's currency, so it must be known
+  // (stored by saveTikTokAdConnections, compared with the brand's currency
+  // before a campaign is prepared). Both adapters always return it.
+  const noCurrency = advertisers.find((a) => !a.currency);
+  if (noCurrency) {
+    throw new IntegrationError(
+      "tiktok_ads",
+      "provider_error",
+      `TikTok did not return the currency of advertiser ${noCurrency.advertiserId}; try connecting again.`,
+    );
+  }
 
   const known = new Set(
     (
