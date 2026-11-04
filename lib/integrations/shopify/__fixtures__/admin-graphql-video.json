@@ -1,0 +1,189 @@
+{
+  "_comment": "Admin GraphQL 2026-10 responses for product videos, shaped on the documented payloads (stagedUploadsCreate, productUpdate with media, Video, VideoSource, fileDelete). Ids, URLs and signatures are fake.",
+  "productNoVideo": {
+    "data": {
+      "product": {
+        "id": "gid://shopify/Product/9001",
+        "media": {
+          "nodes": [
+            { "id": "gid://shopify/MediaImage/501", "mediaContentType": "IMAGE" },
+            {
+              "id": "gid://shopify/Video/400",
+              "mediaContentType": "VIDEO",
+              "status": "READY",
+              "filename": "merchant-unboxing.mp4",
+              "mediaErrors": [],
+              "sources": [],
+              "originalSource": null
+            }
+          ]
+        }
+      }
+    }
+  },
+  "productMissing": { "data": { "product": null } },
+  "stagedTarget": {
+    "data": {
+      "stagedUploadsCreate": {
+        "stagedTargets": [
+          {
+            "url": "https://shopify-video-production-core-originals.storage.googleapis.com",
+            "resourceUrl": "https://shopify-video-production-core-originals.storage.googleapis.com?external_video_id=7700",
+            "parameters": [
+              {
+                "name": "GoogleAccessId",
+                "value": "video-production@video-production.iam.gserviceaccount.com"
+              },
+              { "name": "key", "value": "c/o/v/tcv-marker.mp4" },
+              { "name": "policy", "value": "eyJmYWtlIjoicG9saWN5In0=" },
+              { "name": "signature", "value": "ZmFrZS1zaWduYXR1cmU=" }
+            ]
+          }
+        ],
+        "userErrors": []
+      }
+    }
+  },
+  "stagedUserErrors": {
+    "data": {
+      "stagedUploadsCreate": {
+        "stagedTargets": [{ "url": null, "resourceUrl": null, "parameters": [] }],
+        "userErrors": [
+          {
+            "field": ["input", "0", "fileSize"],
+            "message": "File size is required when uploading VIDEO or MODEL_3D resources."
+          }
+        ]
+      }
+    }
+  },
+  "attachOk": {
+    "data": {
+      "productUpdate": { "product": { "id": "gid://shopify/Product/9001" }, "userErrors": [] }
+    }
+  },
+  "attachUserErrors": {
+    "data": {
+      "productUpdate": {
+        "product": { "id": "gid://shopify/Product/9001" },
+        "userErrors": [
+          {
+            "field": ["media", "0", "originalSource"],
+            "message": "Media limit reached for this product"
+          }
+        ]
+      }
+    }
+  },
+  "videoUploaded": {
+    "id": "gid://shopify/Video/7701",
+    "mediaContentType": "VIDEO",
+    "status": "UPLOADED",
+    "filename": "__FILENAME__",
+    "mediaErrors": [],
+    "sources": [],
+    "originalSource": null
+  },
+  "videoProcessing": {
+    "id": "gid://shopify/Video/7701",
+    "status": "PROCESSING",
+    "filename": "__FILENAME__",
+    "mediaErrors": [],
+    "sources": [],
+    "originalSource": null
+  },
+  "videoReady": {
+    "id": "gid://shopify/Video/7701",
+    "status": "READY",
+    "filename": "__FILENAME__",
+    "mediaErrors": [],
+    "sources": [
+      {
+        "url": "https://cdn.shopify.com/videos/c/vp/abc/abc.m3u8",
+        "mimeType": "application/x-mpegURL",
+        "format": "m3u8",
+        "height": 1920,
+        "width": 1080
+      },
+      {
+        "url": "https://cdn.shopify.com/videos/c/vp/abc/abc.SD-480p-0.9Mbps.mp4",
+        "mimeType": "video/mp4",
+        "format": "mp4",
+        "height": 854,
+        "width": 480
+      },
+      {
+        "url": "https://cdn.shopify.com/videos/c/vp/abc/abc.HD-1080p-4.8Mbps.mp4",
+        "mimeType": "video/mp4",
+        "format": "mp4",
+        "height": 1080,
+        "width": 608
+      },
+      {
+        "url": "https://cdn.shopify.com/videos/c/vp/abc/abc.HD-720p-2.5Mbps.mp4",
+        "mimeType": "video/mp4",
+        "format": "mp4",
+        "height": 720,
+        "width": 406
+      }
+    ],
+    "originalSource": {
+      "url": "https://cdn.shopify.com/videos/c/o/v/abc.mp4",
+      "mimeType": "video/mp4",
+      "format": "mp4",
+      "height": 1920,
+      "width": 1080
+    }
+  },
+  "videoFailed": {
+    "id": "gid://shopify/Video/7701",
+    "status": "FAILED",
+    "filename": "__FILENAME__",
+    "mediaErrors": [
+      {
+        "code": "VIDEO_VALIDATION_ERROR",
+        "details": "Unsupported codec",
+        "message": "Media failed to process"
+      }
+    ],
+    "sources": [],
+    "originalSource": null
+  },
+  "fileDeleteOk": {
+    "data": { "fileDelete": { "deletedFileIds": ["gid://shopify/Video/7701"], "userErrors": [] } }
+  },
+  "fileDeleteGone": {
+    "data": {
+      "fileDelete": {
+        "deletedFileIds": [],
+        "userErrors": [
+          {
+            "field": ["fileIds"],
+            "message": "File id gid://shopify/Video/7701 does not exist.",
+            "code": "FILE_DOES_NOT_EXIST"
+          }
+        ]
+      }
+    }
+  },
+  "nodeMissing": { "data": { "node": null } },
+  "templatesPage": {
+    "data": {
+      "themes": {
+        "nodes": [
+          {
+            "id": "gid://shopify/OnlineStoreTheme/1",
+            "name": "Dawn",
+            "files": {
+              "nodes": [
+                { "filename": "templates/product.json" },
+                { "filename": "templates/product.trendcart.json" }
+              ],
+              "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -5,7 +5,6 @@ import { IntegrationError, shopifyShopInfoSchema } from "@/lib/domain/contracts"
 import gqlFixtures from "./__fixtures__/admin-graphql.json";
 import oauth from "./__fixtures__/oauth.json";
 import { SHOPIFY_SCOPES } from "./config";
-import { ShopifyNotImplementedError } from "./errors";
 import type { FetchLike } from "./graphql";
 import { createLiveShopifyClient } from "./live";
 import { shopifyInstallTokenSchema } from "./types";
@@ -336,16 +335,5 @@ describe("live Admin GraphQL", () => {
     );
     expect(server.code).toBe("provider_error");
     expect(server.retryable).toBe(true);
-  });
-
-  it("the M3 video upload still throws a typed, non-retryable not-implemented error", async () => {
-    const error = await rejection(
-      client(replay().fetch).attachVideoFromUrl(creds, {
-        productId: "gid://shopify/Product/1",
-        sourceUrl: "https://x.test/v.mp4",
-      }),
-    );
-    expect(error).toBeInstanceOf(ShopifyNotImplementedError);
-    expect(error.retryable).toBe(false);
   });
 });

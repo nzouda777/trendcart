@@ -32,6 +32,7 @@ import {
   type MetafieldDefinitionInfo,
 } from "./templates";
 import type { ShopifyAdapter, ShopifyInstallToken } from "./types";
+import { sourceKey, videoMarker } from "./video";
 
 /**
  * Product templates of the mock theme, keyed by suffix ("" = product.json).
@@ -522,9 +523,19 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
       try {
         source = new URL(input.sourceUrl);
       } catch {
-        throw shopifyError("invalid_input", "Mock Shopify: sourceUrl must be a URL.");
+        throw shopifyError("invalid_input", "Mock Shopify: sourceUrl must be a URL.", {
+          retryable: false,
+        });
       }
-      const key = digest(creds.shopDomain, input.productId, source.toString());
+      if (source.protocol !== "https:" && source.protocol !== "http:") {
+        throw shopifyError("invalid_input", "Mock Shopify: sourceUrl must be http(s).", {
+          retryable: false,
+        });
+      }
+      // Same idempotency as live: the Trendcart video id, else the URL without
+      // its (expiring) query string. A re-run returns the same media.
+      const marker = videoMarker(input.idempotencyKey?.trim() || sourceKey(source.toString()));
+      const key = digest(creds.shopDomain, input.productId, marker);
       return shopifyMediaRefSchema.parse({
         mediaId: `gid://shopify/Video/${numericId(key)}`,
         fileUrl: `https://cdn.shopify.com/videos/c/o/v/${key.slice(0, 32)}.mp4`,
@@ -534,8 +545,16 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
 
     async deleteProductMedia(creds, input) {
       assertCreds(creds);
-      if (input.mediaIds.some((id) => !id.startsWith("gid://shopify/"))) {
-        throw shopifyError("invalid_input", "Mock Shopify: media ids must be GIDs.");
+      if (!/^gid:\/\/shopify\/Product\/\d+$/.test(input.productId)) {
+        throw shopifyError("invalid_input", "Mock Shopify: expected a product GID.", {
+          retryable: false,
+        });
+      }
+      // Images and videos alike; already-deleted media is a success (as live).
+      if (input.mediaIds.some((id) => !/^gid:\/\/shopify\/[A-Za-z]+\/\d+$/.test(id))) {
+        throw shopifyError("invalid_input", "Mock Shopify: media ids must be GIDs.", {
+          retryable: false,
+        });
       }
     },
 
