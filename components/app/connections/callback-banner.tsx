@@ -21,6 +21,8 @@ const REASONS: Record<string, string> = {
   invalid_hmac: "Shopify's signature could not be verified. Start again.",
   auth_expired: "Authorization expired. Start again.",
   permission_denied: "Access was declined or a required permission is missing.",
+  not_configured:
+    "TikTok is not set up on this server yet: its app key and secret are missing. Add them to the environment variables and redeploy.",
   rate_limited: "The provider is rate limiting requests. Try again in a minute.",
   quota_exceeded: "A usage limit was reached. Try again later.",
   provider_error: "The provider returned an error. Try again.",

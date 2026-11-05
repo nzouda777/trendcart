@@ -1,6 +1,4 @@
-import { IntegrationError } from "@/lib/domain/contracts";
-
-import type { Env } from "./safety";
+import { MissingConfigError, type Env } from "./safety";
 
 /*
  * TikTok API for Business (Marketing API) settings.
@@ -39,12 +37,7 @@ export function readAdsConfig(env: Env = process.env): TikTokAdsConfig {
   const appId = env.TIKTOK_APP_ID;
   const appSecret = env.TIKTOK_APP_SECRET;
   if (!appId || !appSecret) {
-    throw new IntegrationError(
-      TIKTOK_ADS_PROVIDER,
-      "permission_denied",
-      "TIKTOK_APP_ID and TIKTOK_APP_SECRET must be set for live TikTok Ads.",
-      { retryable: false },
-    );
+    throw new MissingConfigError(TIKTOK_ADS_PROVIDER, ["TIKTOK_APP_ID", "TIKTOK_APP_SECRET"]);
   }
   return { appId, appSecret, sandbox: isSandbox(env) };
 }

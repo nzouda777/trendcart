@@ -1,7 +1,7 @@
 import { IntegrationError, type TikTokPrivacyLevel } from "@/lib/domain/contracts";
 
 import { isSandbox } from "../tiktok-ads/config";
-import { isTestEnvironment, type Env } from "../tiktok-ads/safety";
+import { isTestEnvironment, MissingConfigError, type Env } from "../tiktok-ads/safety";
 
 /*
  * TikTok for Developers: Login Kit (web) + Content Posting API (v2).
@@ -54,12 +54,10 @@ export function readLoginConfig(env: Env = process.env): TikTokLoginConfig {
   const clientKey = env.TIKTOK_LOGIN_CLIENT_KEY;
   const clientSecret = env.TIKTOK_LOGIN_CLIENT_SECRET;
   if (!clientKey || !clientSecret) {
-    throw new IntegrationError(
-      TIKTOK_POSTING_PROVIDER,
-      "permission_denied",
-      "TIKTOK_LOGIN_CLIENT_KEY and TIKTOK_LOGIN_CLIENT_SECRET must be set for live TikTok posting.",
-      { retryable: false },
-    );
+    throw new MissingConfigError(TIKTOK_POSTING_PROVIDER, [
+      "TIKTOK_LOGIN_CLIENT_KEY",
+      "TIKTOK_LOGIN_CLIENT_SECRET",
+    ]);
   }
   return { clientKey, clientSecret, sandbox: isSandbox(env), audited: isPostingAudited(env) };
 }

@@ -9,6 +9,7 @@ import { OAuthStateError } from "@/lib/auth/oauth-state";
 import { AUTH_PATHS } from "@/lib/auth/paths";
 import { IntegrationError } from "@/lib/domain/contracts";
 import { getIntegrations } from "@/lib/integrations";
+import { MissingConfigError } from "@/lib/integrations/tiktok-ads/safety";
 import { publicOrigin } from "@/lib/integrations/shopify/http";
 
 /** Where the connections screen lives (built by app-ui). */
@@ -38,6 +39,7 @@ export function redirectTo(request: Request, path: string, params: Record<string
 /** Stable, non-sensitive reason code for the UI. Never echoes provider messages. */
 export function errorReason(error: unknown): string {
   if (error instanceof OAuthStateError) return "invalid_state";
+  if (error instanceof MissingConfigError) return "not_configured";
   if (error instanceof IntegrationError) return error.code;
   if (isAccessError(error)) return error.code;
   if (error instanceof ZodError) return "invalid_input";
@@ -53,5 +55,9 @@ export function failureRedirect(request: Request, provider: string, error: unkno
   }
   const reason = errorReason(error);
   if (reason === "unexpected") console.error(`[${provider}] connect failed`, error);
+  // Our own messages (never TikTok's raw text), so they are safe to log.
+  else if (reason === "not_configured" || reason === "permission_denied") {
+    console.warn(`[${provider}] connect refused: ${(error as Error).message}`);
+  }
   return redirectTo(request, CONNECTIONS_PATH, { [provider]: "error", reason });
 }

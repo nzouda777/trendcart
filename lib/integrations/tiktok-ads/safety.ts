@@ -43,6 +43,25 @@ export function isTestEnvironment(env: Env = process.env): boolean {
   return envSaysTest(env) || envSaysTest(process.env);
 }
 
+/**
+ * A required app credential (env var) is missing on this server. Kept as
+ * permission_denied for retry logic, but marked so OAuth routes can tell the
+ * user it is a setup problem, not a refusal by TikTok.
+ */
+export class MissingConfigError extends IntegrationError {
+  readonly missingConfig = true;
+
+  constructor(
+    provider: string,
+    readonly variables: readonly string[],
+  ) {
+    super(provider, "permission_denied", `${variables.join(" and ")} must be set.`, {
+      retryable: false,
+    });
+    this.name = "MissingConfigError";
+  }
+}
+
 export class UnsafeActionError extends IntegrationError {
   constructor(provider: string, action: string) {
     super(provider, "permission_denied", `${action} is blocked in the test environment.`, {
