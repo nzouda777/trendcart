@@ -4,8 +4,12 @@ import { useState, useTransition, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  AI_VISION_PROVIDERS,
   ANALYSIS_MODELS,
+  analysisProviderOf,
   COPYWRITING_MODELS,
+  DEFAULT_CLAUDE_ANALYSIS_MODEL,
+  type AiVisionProvider,
   TIMEOUT_LIMITS,
   type WorkspaceSettingsInput,
 } from "@/lib/domain/settings";
@@ -62,13 +66,36 @@ export function SettingsForm({ settings, canEdit, onSubmit }: Props) {
   const err = (key: string) => (result && !result.ok ? result.fieldErrors?.[key]?.[0] : undefined);
   const current = <T,>(f: Field<T>) => (f.isDefault ? "" : String(f.value));
 
+  // Gemini or Claude for product identification and the ad rules check. The
+  // provider is the chosen model's; "" = default model (Gemini unless the env
+  // default says otherwise).
+  const [analysisModel, setAnalysisModel] = useState(current(settings.analysisModel));
+  const defaultProvider = analysisProviderOf(settings.analysisModel.defaultValue);
+  const provider: AiVisionProvider =
+    analysisModel === DEFAULT ? defaultProvider : analysisProviderOf(analysisModel);
+  const providerModels = ANALYSIS_MODELS.filter((m) => m.provider === provider);
+  const analysisOptions =
+    provider === defaultProvider
+      ? modelOptions(providerModels, settings.analysisModel.defaultValue)
+      : providerModels.map((m) => ({ value: m.id, label: m.label }));
+
+  function switchProvider(next: AiVisionProvider) {
+    if (next === provider) return;
+    if (next === defaultProvider) setAnalysisModel(DEFAULT);
+    else
+      setAnalysisModel(
+        next === "anthropic"
+          ? DEFAULT_CLAUDE_ANALYSIS_MODEL
+          : (ANALYSIS_MODELS.find((m) => m.provider === next)?.id ?? DEFAULT),
+      );
+  }
+  const providerMeta = AI_VISION_PROVIDERS.find((p) => p.id === provider)!;
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const values: WorkspaceSettingsInput = {
-      analysisModel: stringOrNull(
-        form.get("analysisModel"),
-      ) as WorkspaceSettingsInput["analysisModel"],
+      analysisModel: stringOrNull(analysisModel) as WorkspaceSettingsInput["analysisModel"],
       copywritingModel: stringOrNull(
         form.get("copywritingModel"),
       ) as WorkspaceSettingsInput["copywritingModel"],
@@ -92,13 +119,55 @@ export function SettingsForm({ settings, canEdit, onSubmit }: Props) {
       <fieldset disabled={!canEdit || pending} className="grid gap-6 disabled:opacity-90">
         <fieldset className="grid gap-4 rounded-xl border border-border p-4 sm:grid-cols-2">
           <legend className="px-1 text-sm font-medium">AI usage</legend>
+          <div
+            role="radiogroup"
+            aria-labelledby="ai-provider-label"
+            aria-describedby="ai-provider-hint"
+            className="grid gap-2 sm:col-span-2"
+          >
+            <span id="ai-provider-label" className="text-sm font-medium">
+              Product identification and ad rules check
+            </span>
+            <div className="flex w-fit gap-1 rounded-lg border border-border bg-surface-2 p-1">
+              {AI_VISION_PROVIDERS.map((p) => (
+                <label
+                  key={p.id}
+                  className="cursor-pointer rounded-md px-3 py-1.5 text-sm text-muted-foreground has-checked:bg-background has-checked:text-foreground has-checked:shadow-sm has-focus-visible:ring-3 has-focus-visible:ring-ring/50"
+                >
+                  <input
+                    type="radio"
+                    name="aiProvider"
+                    value={p.id}
+                    checked={provider === p.id}
+                    onChange={() => switchProvider(p.id)}
+                    className="sr-only"
+                  />
+                  {p.label}
+                </label>
+              ))}
+            </div>
+            <p
+              id="ai-provider-hint"
+              className={
+                provider === "anthropic" ? "text-xs text-warning" : "text-xs text-muted-foreground"
+              }
+            >
+              {providerMeta.description}
+              {provider === "anthropic" ? " Needs ANTHROPIC_API_KEY." : " Needs GEMINI_API_KEY."}
+            </p>
+          </div>
           <SelectField
             id="analysisModel"
             name="analysisModel"
-            label="Product identification"
-            options={modelOptions(ANALYSIS_MODELS, settings.analysisModel.defaultValue)}
-            defaultValue={current(settings.analysisModel)}
-            hint="Gemini watches the TikTok video or reads the product page."
+            label={`${providerMeta.label} model`}
+            options={analysisOptions}
+            value={analysisModel}
+            onChange={(e) => setAnalysisModel(e.currentTarget.value)}
+            hint={
+              provider === "anthropic"
+                ? "Identifies the product from the cover image, caption or product page, and reviews the caption and claims."
+                : "Watches the TikTok video or reads the product page, and reviews the video against the ad rules."
+            }
             error={err("analysisModel")}
           />
           <SelectField

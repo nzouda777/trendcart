@@ -8,6 +8,7 @@ import type { HttpFetch } from "@/lib/integrations/tiktok-data/http";
 
 import { createComplianceChecker, mergeRuleResults, POLICY_CATEGORIES, screenPolicy } from ".";
 import {
+  complianceModelFor,
   createLiveComplianceChecker,
   modelRules,
   reviewManipulation,
@@ -393,5 +394,36 @@ describe("keyword screen (current TikTok policies)", () => {
       verdict(screen("Chef knife set", "Kitchen > Knives"), "policy.restricted_products"),
     ).toBe("warn");
     expect(verdict(screen("Kitchen organiser for drawers"), "policy.before_after")).toBe("pass");
+  });
+});
+
+describe("live ComplianceChecker with Claude (workspace Settings)", () => {
+  it("follows the analysis provider: Gemini by default, the chosen Claude model otherwise", () => {
+    expect(complianceModelFor(undefined, "gemini-3.5-flash-lite")).toEqual({
+      modelId: "gemini-3.5-flash-lite",
+      provider: "google",
+    });
+    expect(complianceModelFor("gemini-3.8-flash", "gemini-3.5-flash-lite").provider).toBe("google");
+    expect(complianceModelFor("claude-haiku-5-5", "gemini-3.5-flash-lite")).toEqual({
+      modelId: "claude-haiku-5-5",
+      provider: "anthropic",
+    });
+  });
+
+  it("never downloads the video, reviews the text and marks the video for a manual check", async () => {
+    const net = fakeNetwork();
+    const model = modelReturning(allPass());
+    const { data, usage } = await checker(model, net.fetch).check(
+      { ...ctx, ai: { analysisModel: "claude-sonnet-5-5" } },
+      { ...base, mediaUrl: MEDIA_URL },
+    );
+    expect(net.calls).toHaveLength(0);
+    const scope = data.rules.find((r) => r.ruleId === "policy.ai_review")!;
+    expect(scope.verdict).toBe("warn");
+    expect(scope.reason).toMatch(/Claude cannot watch videos/);
+    expect(data.overall).not.toBe("pass");
+    expect(usage.every((u) => u.provider === "anthropic" && u.model === "claude-sonnet-5-5")).toBe(
+      true,
+    );
   });
 });

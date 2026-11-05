@@ -6,13 +6,53 @@ import { z } from "zod";
  * "default" (env var, then the built-in value below).
  */
 
-/** Gemini models that can analyse a video (Files API) and are priced in lib/ai/pricing. */
-export const ANALYSIS_MODELS = [
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash (recommended)" },
-  { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
-  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite (cheapest, less accurate)" },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+/**
+ * Who identifies the product and reviews videos against the ad rules:
+ * - google (Gemini) watches the TikTok video itself (Files API);
+ * - anthropic (Claude) cannot take video: it works from the cover image, the
+ *   caption and the product page, and the ad rules review covers the text
+ *   only (the video must be checked by hand).
+ */
+export const AI_VISION_PROVIDERS = [
+  {
+    id: "google",
+    label: "Gemini",
+    description: "Watches the TikTok video (visuals, on-screen text, speech).",
+  },
+  {
+    id: "anthropic",
+    label: "Claude",
+    description:
+      "Cannot watch videos: uses the cover image, caption and product page. Videos must be checked by hand for the ad rules.",
+  },
 ] as const;
+export type AiVisionProvider = (typeof AI_VISION_PROVIDERS)[number]["id"];
+
+/**
+ * Models for product identification (and, through their provider, the ad
+ * rules review), all priced in lib/ai/pricing. The provider is part of the id.
+ */
+export const ANALYSIS_MODELS = [
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash (recommended)", provider: "google" },
+  { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", provider: "google" },
+  {
+    id: "gemini-3.5-flash-lite",
+    label: "Gemini 3.5 Flash Lite (cheapest, less accurate)",
+    provider: "google",
+  },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "google" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (recommended)", provider: "anthropic" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (most accurate)", provider: "anthropic" },
+  { id: "claude-haiku-5-5", label: "Claude Haiku 5.5 (cheapest)", provider: "anthropic" },
+] as const satisfies readonly { id: string; label: string; provider: AiVisionProvider }[];
+
+/** Model used when Claude is chosen without a specific model. */
+export const DEFAULT_CLAUDE_ANALYSIS_MODEL = "claude-sonnet-5-5";
+
+/** Provider of an analysis model id (unknown ids are treated as Gemini, the default). */
+export function analysisProviderOf(modelId: string | null | undefined): AiVisionProvider {
+  return modelId?.startsWith("claude-") ? "anthropic" : "google";
+}
 
 /** Claude models for product page copy, priced in lib/ai/pricing. */
 export const COPYWRITING_MODELS = [

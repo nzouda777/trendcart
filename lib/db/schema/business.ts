@@ -699,7 +699,7 @@ export const workspaceSettings = pgTable(
   {
     id: id(),
     workspaceId: workspaceId(),
-    /** Gemini model for product analysis (lib/domain/settings ANALYSIS_MODELS). */
+    /** Product analysis model, Gemini or Claude (lib/domain/settings ANALYSIS_MODELS). */
     analysisModel: text("analysis_model"),
     /** Claude model for page copy (COPYWRITING_MODELS). */
     copywritingModel: text("copywriting_model"),

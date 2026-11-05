@@ -1,13 +1,21 @@
 import "server-only";
 
 /**
- * Live ProductAnalyzer: Gemini via the AI SDK (@ai-sdk/google).
+ * Live ProductAnalyzer: Gemini (@ai-sdk/google) or Claude (@ai-sdk/anthropic)
+ * via the AI SDK, chosen by the workspace's analysis model (Settings).
  *
+ * Gemini:
  * tiktok_video: the fresh media URL is fetched through the brand proxy and
  *   piped into the Gemini Files API (gemini-files.ts), analysed, then deleted.
  *   Nothing is written to disk.
  * product_link: the page is fetched through the brand proxy, reduced to text
  *   (title, meta, JSON-LD, visible text) and analysed as text.
+ *
+ * Claude cannot take video input:
+ * tiktok_video: the cover image (fetched through the brand proxy, at most
+ *   IMAGE_MAX_BYTES, kept in memory only) and the caption are analysed;
+ *   bestFrameSec is always null. With neither, the analysis is refused.
+ * product_link: the page text, plus the page's main image when it loads.
  *
  * Time budget: one analysis (media fetch, upload, processing, model call)
  * stops after ANALYZE_BUDGET_MS with a retryable error, so the workflow step
@@ -48,8 +56,13 @@ import {
   type HttpFetch,
 } from "@/lib/integrations/tiktok-data/http";
 
-import { DEFAULT_ANALYSIS_TIMEOUT_SEC } from "@/lib/domain/settings";
+import {
+  analysisProviderOf,
+  DEFAULT_ANALYSIS_TIMEOUT_SEC,
+  type AiVisionProvider,
+} from "@/lib/domain/settings";
 
+import { anthropicModel } from "./anthropic-model";
 import { deleteGeminiFile, uploadToGeminiFiles, type GeminiFilesConfig } from "./gemini-files";
 import { extractPage } from "./page-text";
 import { modelIds, tokenUsage } from "./pricing";
@@ -126,12 +139,13 @@ function prompt(language: string, extra: string, hint?: AnalyzeHint): string {
 }
 
 export type LiveAnalyzerOptions = {
-  /** Injected model (tests); defaults to Gemini from GEMINI_API_KEY. */
+  /** Injected model (tests); defaults to Gemini (GEMINI_API_KEY) or Claude (ANTHROPIC_API_KEY). */
   model?: LanguageModel;
   modelId?: string;
   /** Base fetch for media, pages and the Files API (tests). */
   fetch?: HttpFetch;
   apiKey?: string;
+  anthropicApiKey?: string;
   geminiBaseUrl?: string;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
@@ -139,13 +153,13 @@ export type LiveAnalyzerOptions = {
   budgetMs?: number;
 };
 
-function mapModelError(error: unknown): never {
+function mapModelError(error: unknown, provider: AiVisionProvider = "google"): never {
   if (error instanceof IntegrationError) throw error;
   // After the SDK retry, the HTTP status is on the last attempt.
-  if (RetryError.isInstance(error)) return mapModelError(error.lastError);
+  if (RetryError.isInstance(error)) return mapModelError(error.lastError, provider);
   if (NoObjectGeneratedError.isInstance(error)) {
     throw new IntegrationError(
-      "google",
+      provider,
       "provider_error",
       "The model returned an invalid product analysis.",
       {
@@ -156,9 +170,43 @@ function mapModelError(error: unknown): never {
   }
   if (APICallError.isInstance(error)) {
     const status = error.statusCode ?? 500;
-    throw httpStatusError("google", status, error.message);
+    throw httpStatusError(provider, status, error.message);
   }
-  throw networkError("google", error);
+  throw networkError(provider, error);
+}
+
+/** Largest image handed to Claude (its per-image limit is 5 MB). */
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = /^image\/(jpeg|png|gif|webp)$/;
+
+/**
+ * Loads an image for Claude through the given client (brand proxy). Null
+ * when it cannot be loaded, is not a supported image or is too large: the
+ * analysis then goes on without it. Kept in memory only.
+ */
+async function loadImage(
+  fetchVia: HttpFetch,
+  url: string | null | undefined,
+  budget: AbortSignal,
+): Promise<{ data: Uint8Array; mediaType: string } | null> {
+  if (!url) return null;
+  try {
+    const res = await fetchVia(url, {
+      headers: { referer: "https://www.tiktok.com/", "user-agent": "Mozilla/5.0" },
+      signal: AbortSignal.any([AbortSignal.timeout(20_000), budget]),
+    });
+    const type = res.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+    const declared = Number(res.headers.get("content-length"));
+    if (!res.ok || !res.body || !IMAGE_TYPES.test(type) || declared > IMAGE_MAX_BYTES) {
+      await res.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const data = new Uint8Array(await res.arrayBuffer());
+    if (data.byteLength === 0 || data.byteLength > IMAGE_MAX_BYTES) return null;
+    return { data, mediaType: type };
+  } catch {
+    return null;
+  }
 }
 
 /** Default whole-analysis budget (Settings can change it, 30 to 270 s). */
@@ -192,13 +240,17 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
     if (options.model) return options.model;
     let m = models.get(modelId);
     if (!m) {
-      m = createGoogleGenerativeAI({ apiKey: apiKey() })(modelId);
+      m =
+        analysisProviderOf(modelId) === "anthropic"
+          ? anthropicModel(modelId, { apiKey: options.anthropicApiKey })
+          : createGoogleGenerativeAI({ apiKey: apiKey() })(modelId);
       models.set(modelId, m);
     }
     return m;
   };
 
   async function run(content: ModelMessage[], budget: AbortSignal, modelId: string) {
+    const provider = analysisProviderOf(modelId);
     try {
       const result = await generateText({
         model: getModel(modelId),
@@ -207,11 +259,13 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
         output: Output.object({ schema: modelAnalysisSchema, name: "product_analysis" }),
         maxRetries: 1,
         abortSignal: AbortSignal.any([AbortSignal.timeout(MODEL_TIMEOUT_MS), budget]),
-        providerOptions: { google: { thinkingConfig: thinkingFor(modelId) } },
+        ...(provider === "google"
+          ? { providerOptions: { google: { thinkingConfig: thinkingFor(modelId) } } }
+          : {}),
       });
       return { output: result.output, usage: result.usage };
     } catch (error) {
-      mapModelError(error);
+      mapModelError(error, provider);
     }
   }
 
@@ -230,6 +284,7 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
       const direct = createHttpClient({}, { fetch: options.fetch });
       // Workspace Settings (CallContext.ai) override the defaults.
       const modelId = callCtx.ai?.analysisModel ?? defaultModelId;
+      const provider = analysisProviderOf(modelId);
       const budget = AbortSignal.timeout(
         options.budgetMs ?? callCtx.ai?.analysisTimeoutMs ?? ANALYZE_BUDGET_MS,
       );
@@ -238,7 +293,44 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
       let tokens: { inputTokens?: number; outputTokens?: number };
       let referenceImageUrl: string | null = null;
 
-      if (input.source === "tiktok_video") {
+      if (input.source === "tiktok_video" && provider === "anthropic") {
+        // Claude cannot watch the video: cover image + caption.
+        const image = await loadImage(viaProxy, input.thumbnailUrl, budget);
+        const caption = input.caption?.trim() ? input.caption.slice(0, 2000) : "";
+        if (!image && !caption) {
+          throw new IntegrationError(
+            "anthropic",
+            "invalid_input",
+            "Claude cannot watch videos, and this TikTok has no usable cover image or caption. Switch the analysis to Gemini in Settings, or import the product link instead.",
+            { retryable: false },
+          );
+        }
+        const notes = [
+          "You cannot see the video itself: only its cover image and its caption. Identify the product from them and lower confidence when they are ambiguous. bestFrameSec must be null.",
+          caption ? `TikTok caption: """${caption}"""` : "The video has no caption.",
+          image ? "" : "The cover image could not be loaded.",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const res = await run(
+          [
+            {
+              role: "user",
+              content: [
+                ...(image
+                  ? [{ type: "image" as const, image: image.data, mediaType: image.mediaType }]
+                  : []),
+                { type: "text", text: prompt(language, notes, hint) },
+              ],
+            },
+          ],
+          budget,
+          modelId,
+        );
+        modelOut = { ...res.output, bestFrameSec: null };
+        tokens = { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens };
+        referenceImageUrl = input.thumbnailUrl ?? null;
+      } else if (input.source === "tiktok_video") {
         let media;
         try {
           media = await viaProxy(input.mediaUrl, {
@@ -307,11 +399,17 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
         referenceImageUrl = input.thumbnailUrl ?? null;
       } else {
         const page = await extractPage(viaProxy, input.url);
+        // Claude also looks at the page's main image (Gemini reads the text, as before).
+        const image =
+          provider === "anthropic" ? await loadImage(viaProxy, page.imageUrl, budget) : null;
         const res = await run(
           [
             {
               role: "user",
               content: [
+                ...(image
+                  ? [{ type: "image" as const, image: image.data, mediaType: image.mediaType }]
+                  : []),
                 {
                   type: "text",
                   text: prompt(
@@ -334,7 +432,7 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
       const parsed = productAnalysisSchema.safeParse({ ...modelOut, referenceImageUrl });
       if (!parsed.success) {
         throw new IntegrationError(
-          "google",
+          provider,
           "provider_error",
           "The model returned an invalid product analysis.",
           {
@@ -344,7 +442,7 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
         );
       }
       const data: ProductAnalysis = parsed.data;
-      return { data, usage: [tokenUsage("google", modelId, tokens, now())] };
+      return { data, usage: [tokenUsage(provider, modelId, tokens, now())] };
     },
   };
 }

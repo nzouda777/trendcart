@@ -15,7 +15,10 @@ import "server-only";
  * 4. Per rule, the worst verdict of the keyword screen and the LLM wins
  *    (./merge.ts); overall is the worst rule.
  *
- * Model: AI_COMPLIANCE_MODEL (default gemini-3.5-flash-lite, lib/ai/pricing).
+ * Model: AI_COMPLIANCE_MODEL (default gemini-3.5-flash-lite, lib/ai/pricing),
+ * or, when the workspace chose Claude for analysis (Settings), that Claude
+ * model. Claude cannot take video: its review is text only, so
+ * `policy.ai_review` is `warn` (video to check by hand), never `pass`.
  * Time budget: the workspace's analysis time limit (CallContext.ai, Settings),
  * else COMPLIANCE_BUDGET_MS. Cost is returned as AiUsage for meteredCall,
  * which enforces the workspace's monthly AI cap before the call.
@@ -50,6 +53,7 @@ import {
   uploadToGeminiFiles,
   type GeminiFilesConfig,
 } from "@/lib/ai/gemini-files";
+import { anthropicModel } from "@/lib/ai/anthropic-model";
 import { modelIds, tokenUsage } from "@/lib/ai/pricing";
 import {
   callContextSchema,
@@ -59,6 +63,7 @@ import {
   IntegrationError,
   type ComplianceChecker,
 } from "@/lib/domain/contracts";
+import { analysisProviderOf, type AiVisionProvider } from "@/lib/domain/settings";
 import {
   createHttpClient,
   httpStatusError,
@@ -71,7 +76,7 @@ import { POLICY_CATEGORIES, POLICY_CATEGORY_IDS, policyBriefText } from "./polic
 import { screenPolicy } from "./policy-rules";
 import { checkTechnical, overallVerdict, type ComplianceRule } from "./technical";
 
-const PROVIDER = "google";
+const PROVIDER: AiVisionProvider = "google";
 
 /** The contract input. */
 export type ComplianceCheckInput = Parameters<ComplianceChecker["check"]>[1];
@@ -210,13 +215,13 @@ function thinkingFor(modelId: string) {
   return /^gemini-2\./.test(modelId) ? { thinkingBudget: 0 } : { thinkingLevel: "low" as const };
 }
 
-function mapModelError(error: unknown): never {
+function mapModelError(error: unknown, provider: AiVisionProvider = PROVIDER): never {
   if (error instanceof IntegrationError) throw error;
   // After the SDK retry, the HTTP status is on the last attempt.
-  if (RetryError.isInstance(error)) return mapModelError(error.lastError);
+  if (RetryError.isInstance(error)) return mapModelError(error.lastError, provider);
   if (NoObjectGeneratedError.isInstance(error)) {
     throw new IntegrationError(
-      PROVIDER,
+      provider,
       "provider_error",
       "The model returned an invalid policy review.",
       {
@@ -226,15 +231,17 @@ function mapModelError(error: unknown): never {
     );
   }
   if (APICallError.isInstance(error)) {
-    throw httpStatusError(PROVIDER, error.statusCode ?? 500, error.message);
+    throw httpStatusError(provider, error.statusCode ?? 500, error.message);
   }
-  throw networkError(PROVIDER, error);
+  throw networkError(provider, error);
 }
 
 export type LiveComplianceOptions = {
-  /** Injected model (tests); defaults to Gemini from GEMINI_API_KEY. */
+  /** Injected model (tests); defaults to Gemini (GEMINI_API_KEY) or Claude (ANTHROPIC_API_KEY). */
   model?: LanguageModel;
+  /** Gemini compliance model (default AI_COMPLIANCE_MODEL). */
   modelId?: string;
+  anthropicApiKey?: string;
   /** Base fetch for the media and the Files API (tests). */
   fetch?: HttpFetch;
   apiKey?: string;
@@ -247,8 +254,22 @@ export type LiveComplianceOptions = {
 
 const looksLikeVideo = (type: string | null) => !!type && /^video\//.test(type);
 
+/**
+ * Model for one check: Gemini (the compliance model) unless the workspace
+ * chose Claude for analysis (Settings), then that Claude model. Claude cannot
+ * take video, so its review covers the caption and claims only.
+ */
+export function complianceModelFor(
+  analysisModel: string | undefined,
+  geminiModelId: string,
+): { modelId: string; provider: AiVisionProvider } {
+  return analysisModel && analysisProviderOf(analysisModel) === "anthropic"
+    ? { modelId: analysisModel, provider: "anthropic" }
+    : { modelId: geminiModelId, provider: "google" };
+}
+
 export function createLiveComplianceChecker(options: LiveComplianceOptions = {}) {
-  const modelId = options.modelId ?? modelIds().compliance;
+  const geminiModelId = options.modelId ?? modelIds().compliance;
   const now = options.now ?? (() => new Date());
 
   const apiKey = () => {
@@ -260,24 +281,39 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
     }
     return key;
   };
-  let model = options.model;
-  const getModel = () => (model ??= createGoogleGenerativeAI({ apiKey: apiKey() })(modelId));
+  const models = new Map<string, LanguageModel>();
+  const getModel = (modelId: string, provider: AiVisionProvider) => {
+    if (options.model) return options.model;
+    let m = models.get(modelId);
+    if (!m) {
+      m =
+        provider === "anthropic"
+          ? anthropicModel(modelId, { apiKey: options.anthropicApiKey })
+          : createGoogleGenerativeAI({ apiKey: apiKey() })(modelId);
+      models.set(modelId, m);
+    }
+    return m;
+  };
 
-  async function review(content: UserContent, budget: AbortSignal) {
+  type Choice = { modelId: string; provider: AiVisionProvider };
+
+  async function review(content: UserContent, budget: AbortSignal, choice: Choice) {
     try {
       const result = await generateText({
-        model: getModel(),
+        model: getModel(choice.modelId, choice.provider),
         system: SYSTEM,
         messages: [{ role: "user", content }],
         output: Output.object({ schema: modelPolicyReviewSchema, name: "policy_review" }),
         maxRetries: 1,
         temperature: 0,
         abortSignal: AbortSignal.any([AbortSignal.timeout(MODEL_TIMEOUT_MS), budget]),
-        providerOptions: { google: { thinkingConfig: thinkingFor(modelId) } },
+        ...(choice.provider === "google"
+          ? { providerOptions: { google: { thinkingConfig: thinkingFor(choice.modelId) } } }
+          : {}),
       });
       return { output: result.output, usage: result.usage };
     } catch (error) {
-      mapModelError(error);
+      mapModelError(error, choice.provider);
     }
   }
 
@@ -285,8 +321,12 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
    * The review, asked once more when it skipped categories (within the
    * budget). Ratings of both answers are combined, worst verdict wins.
    */
-  async function fullReview(content: Exclude<UserContent, string>, budget: AbortSignal) {
-    const first = await review(content, budget);
+  async function fullReview(
+    content: Exclude<UserContent, string>,
+    budget: AbortSignal,
+    choice: Choice,
+  ) {
+    const first = await review(content, budget, choice);
     const runs = [first];
     let rules = modelRules(first.output);
     const missing = unratedCategories(rules);
@@ -300,6 +340,7 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
           },
         ],
         budget,
+        choice,
       );
       runs.push(second);
       rules = modelRules({ rules: [...first.output.rules, ...second.output.rules] });
@@ -324,9 +365,13 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
 
       const technical = checkTechnical(input);
       const keyword = screenPolicy(input);
+      // Workspace Settings: Claude for analysis means Claude here too (text only).
+      const choice = complianceModelFor(callCtx.ai?.analysisModel, geminiModelId);
+      const { modelId } = choice;
+      const videoReviewed = !!input.mediaUrl && choice.provider === "google";
 
       let res: Awaited<ReturnType<typeof fullReview>>;
-      if (input.mediaUrl) {
+      if (videoReviewed && input.mediaUrl) {
         // Media through the brand proxy; Google direct.
         const viaProxy = createHttpClient(callCtx, { fetch: options.fetch });
         const direct = createHttpClient({}, { fetch: options.fetch });
@@ -374,12 +419,17 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
               { type: "text", text: reviewPrompt(input, true) },
             ],
             budget,
+            choice,
           );
         } finally {
           await deleteGeminiFile(files, file.name);
         }
       } else {
-        res = await fullReview([{ type: "text", text: reviewPrompt(input, false) }], budget);
+        res = await fullReview(
+          [{ type: "text", text: reviewPrompt(input, false) }],
+          budget,
+          choice,
+        );
       }
 
       // Fail-closed: a category the model never rated cannot pass.
@@ -408,12 +458,14 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
       const scope: ComplianceRule = {
         ruleId: "policy.ai_review",
         kind: "policy",
-        verdict: missing.length ? "fail" : input.mediaUrl ? "pass" : "warn",
+        verdict: missing.length ? "fail" : videoReviewed ? "pass" : "warn",
         reason: [
           `AI policy review (${modelId}) of the caption and claims`,
-          input.mediaUrl
+          videoReviewed
             ? " and the video (visuals, on-screen text, speech)"
-            : "; the video itself was not reviewed (visuals, on-screen text, speech): check it by hand",
+            : choice.provider === "anthropic"
+              ? "; Claude cannot watch videos, so the video itself was not reviewed (visuals, on-screen text, speech): check it by hand"
+              : "; the video itself was not reviewed (visuals, on-screen text, speech): check it by hand",
           input.countries.length ? ` for ${input.countries.join(", ")}.` : ".",
           missing.length
             ? ` ${missing.length} categor${missing.length === 1 ? "y was" : "ies were"} not rated by the model after ${res.attempts} attempt${res.attempts === 1 ? "" : "s"}: the review is incomplete.`
@@ -437,7 +489,7 @@ export function createLiveComplianceChecker(options: LiveComplianceOptions = {})
       });
       const usage = res.usages.map((u) =>
         tokenUsage(
-          PROVIDER,
+          choice.provider,
           modelId,
           { inputTokens: u.inputTokens, outputTokens: u.outputTokens },
           now(),
