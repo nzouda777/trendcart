@@ -27,6 +27,27 @@ export const siteConfig = {
     home: "/",
     signIn: "/sign-in",
     signUp: "/sign-up",
+    privacy: "/privacy",
+    terms: "/terms",
+  },
+  /**
+   * Who operates the service, shown on /privacy and /terms (required by
+   * TikTok and Shopify app review).
+   * TODO: fill in the legal entity, contact email and country before
+   * submitting the TikTok or Shopify apps. Empty values are left out of the
+   * pages rather than invented.
+   */
+  legal: {
+    /** Legal name of the company that operates Trendcart, e.g. "Acme SAS". */
+    operator: "",
+    /** Postal address of that company. */
+    address: "",
+    /** Inbox for privacy and legal requests, e.g. "privacy@yourdomain.com". */
+    contactEmail: "",
+    /** Country whose law governs the terms, e.g. "France". */
+    governingLaw: "",
+    /** Shown at the top of both pages; update when their content changes. */
+    lastUpdated: "November 5, 2026",
   },
   // TODO: replace with the real handles once the accounts exist.
   socials: [

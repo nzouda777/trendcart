@@ -23,10 +23,10 @@ export const landing = {
     ariaLabel: "Main",
     links: [
       { label: "Product", href: "#product" },
-      { label: "How it works", href: "#how-it-works" },
-      { label: "Features", href: "#features" },
-      { label: "Pricing", href: "#pricing" },
-      { label: "FAQ", href: "#faq" },
+      { label: "How it works", href: "/#how-it-works" },
+      { label: "Features", href: "/#features" },
+      { label: "Pricing", href: "/#pricing" },
+      { label: "FAQ", href: "/#faq" },
     ],
     signIn: { label: "Sign in", href: siteConfig.links.signIn },
     getStarted: { label: "Get started", href: siteConfig.links.signUp },
@@ -462,15 +462,16 @@ export const landing = {
   },
 
   footer: {
-    // TODO: Resources, Company and Legal pages don't exist yet; replace "#" hrefs when they do.
+    // TODO: Resources and Company pages don't exist yet; replace "#" hrefs when they do.
+    // Product links are "/#…" so they also work from /privacy and /terms.
     columns: [
       {
         title: "Product",
         links: [
-          { label: "How it works", href: "#how-it-works" },
-          { label: "Features", href: "#features" },
-          { label: "Pricing", href: "#pricing" },
-          { label: "FAQ", href: "#faq" },
+          { label: "How it works", href: "/#how-it-works" },
+          { label: "Features", href: "/#features" },
+          { label: "Pricing", href: "/#pricing" },
+          { label: "FAQ", href: "/#faq" },
         ],
       },
       {
@@ -491,9 +492,9 @@ export const landing = {
       {
         title: "Legal",
         links: [
-          { label: "Privacy policy", href: "#" },
-          { label: "Terms of service", href: "#" },
-          { label: "Cookie policy", href: "#" },
+          { label: "Privacy policy", href: siteConfig.links.privacy },
+          { label: "Terms of service", href: siteConfig.links.terms },
+          { label: "Cookie policy", href: `${siteConfig.links.privacy}#cookies` },
         ],
       },
     ],

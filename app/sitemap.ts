@@ -14,5 +14,15 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "weekly",
       priority: 1,
     },
+    {
+      url: `${siteConfig.url}${siteConfig.links.privacy}`,
+      changeFrequency: "yearly",
+      priority: 0.3,
+    },
+    {
+      url: `${siteConfig.url}${siteConfig.links.terms}`,
+      changeFrequency: "yearly",
+      priority: 0.3,
+    },
   ];
 }
