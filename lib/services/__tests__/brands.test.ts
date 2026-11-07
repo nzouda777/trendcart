@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { ForbiddenError, NotFoundError } from "@/lib/auth/errors";
 import { auditLog, brand, campaign, product, proxy, tiktokAdConnection } from "@/lib/db/schema";
+import { createMockProxyChecker } from "@/lib/integrations/proxy-check/mock";
 import { createScopedDb } from "@/lib/tenant/scoped-db";
 import { buildCallContext } from "@/lib/workflows/call-context";
 
@@ -13,12 +14,13 @@ import {
   getBrand,
   listBrands,
   setBrandProxy,
+  testBrandProxy,
   toggleBrandProxy,
   updateBrand,
 } from "../brands";
 import { ServiceError } from "../errors";
 
-import { newBrandInput, setupTestEnv, type TestEnv } from "./helpers";
+import { fakeIntegrations, newBrandInput, setupTestEnv, type TestEnv } from "./helpers";
 
 let env: TestEnv;
 
@@ -230,5 +232,37 @@ describe("deleteBrand", () => {
     await db.delete(campaign, undefined);
     await deleteBrand(env.a.owner, created.id);
     expect(await db.count(product)).toBe(0);
+  });
+});
+
+describe("proxy test", () => {
+  const deps = { integrations: fakeIntegrations({ proxyChecker: createMockProxyChecker() }) };
+
+  it("follows the brand proxy state: direct, proxied, then direct when disabled", async () => {
+    const created = await createBrand(env.a.owner, newBrandInput());
+    expect(await testBrandProxy(env.a.owner, created.id, deps)).toMatchObject({
+      route: "direct",
+      simulated: true,
+    });
+
+    await setBrandProxy(env.a.owner, created.id, { url: PROXY });
+    const proxied = await testBrandProxy(env.a.media_buyer, created.id, deps);
+    expect(proxied).toMatchObject({ route: "proxy", proxyKind: "http", simulated: true });
+    expect(JSON.stringify(proxied)).not.toContain("s3cret");
+
+    await toggleBrandProxy(env.a.owner, created.id, false);
+    expect((await testBrandProxy(env.a.owner, created.id, deps)).route).toBe("direct");
+  });
+
+  it("is refused to viewers and creatives, and across workspaces", async () => {
+    const created = await createBrand(env.a.owner, newBrandInput());
+    for (const role of ["viewer", "creative"] as const) {
+      await expect(testBrandProxy(env.a[role], created.id, deps)).rejects.toBeInstanceOf(
+        ForbiddenError,
+      );
+    }
+    await expect(testBrandProxy(env.bOwner, created.id, deps)).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
   });
 });

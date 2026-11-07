@@ -10,11 +10,12 @@ import { countrySchema, currencySchema, languageSchema } from "@/lib/domain/cont
 import { brand, campaign, product, proxy, shopifyProduct } from "@/lib/db/schema";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row } from "@/lib/tenant/scoped-db";
-import { proxyUrlAad } from "@/lib/workflows/call-context";
+import { buildCallContext, proxyUrlAad } from "@/lib/workflows/call-context";
 
+import { resolveIntegrations, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
 import { isPublicHost } from "./net";
-import type { BrandDTO, BrandProxyDTO } from "./types";
+import type { BrandDTO, BrandProxyCheckDTO, BrandProxyDTO } from "./types";
 
 /* Schemas ------------------------------------------------------------------ */
 
@@ -342,4 +343,23 @@ export async function clearBrandProxy(ctx: WorkspaceContext, brandId: string): P
       );
     }
   });
+}
+
+/**
+ * Sends one test request along the brand's network path (its proxy when
+ * enabled, direct otherwise) and reports the route and the exit IP. Simulated
+ * in mock mode. The proxy URL is decrypted only into the CallContext, never
+ * returned or logged.
+ */
+export async function testBrandProxy(
+  ctx: WorkspaceContext,
+  brandId: string,
+  deps: ServiceDeps = {},
+): Promise<BrandProxyCheckDTO> {
+  requirePermission(ctx, "connection:update");
+  const id = idSchema.parse(brandId);
+  await ctx.db.getById(brand, id);
+  const callCtx = await buildCallContext(ctx.db, id);
+  const result = await resolveIntegrations(deps).proxyChecker.check(callCtx);
+  return { ...result, checkedAt: new Date().toISOString() };
 }

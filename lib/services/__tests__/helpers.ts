@@ -99,6 +99,7 @@ export function fakeIntegrations(overrides: FakeIntegrationsInput = {}): Integra
     supplierFinder: strict("supplierFinder", overrides.supplierFinder),
     complianceChecker: strict("complianceChecker", overrides.complianceChecker),
     copywriter: strict("copywriter", overrides.copywriter),
+    proxyChecker: strict("proxyChecker", overrides.proxyChecker),
   };
 }
 

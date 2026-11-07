@@ -7,6 +7,7 @@ import { createShopifyClient } from "@/lib/integrations/shopify";
 import { createTikTokAdsClient } from "@/lib/integrations/tiktok-ads";
 import { createTikTokDataProvider } from "@/lib/integrations/tiktok-data";
 import { createTikTokPostingClient } from "@/lib/integrations/tiktok-posting";
+import { createProxyChecker } from "@/lib/integrations/proxy-check";
 import { createSupplierFinder } from "@/lib/sourcing";
 
 import { resolveAiMode, resolveIntegrationsMode } from "./mode";
@@ -25,6 +26,7 @@ import { resolveAiMode, resolveIntegrationsMode } from "./mode";
  *   lib/ai                          createProductAnalyzer, createCopywriter
  *   lib/sourcing                    createSupplierFinder
  *   lib/compliance                  createComplianceChecker
+ *   lib/integrations/proxy-check    createProxyChecker
  */
 
 /** Throws in Vercel production unless INTEGRATIONS_MODE=live (see ./mode). */
@@ -54,6 +56,8 @@ export function createIntegrations(
     // No live LLM checker yet (M2): stays on INTEGRATIONS_MODE.
     complianceChecker: createComplianceChecker(mode),
     copywriter: createCopywriter(aiMode),
+    // Same network path as the read-only sourcing adapters.
+    proxyChecker: createProxyChecker(aiMode),
   };
 }
 

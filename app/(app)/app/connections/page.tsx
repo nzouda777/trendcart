@@ -26,6 +26,7 @@ import {
   disconnectAction,
   listTemplatesAction,
   setProxyAction,
+  testProxyAction,
   setTemplateAction,
   toggleProxyAction,
 } from "./actions";
@@ -98,6 +99,7 @@ async function ConnectionsContent({ searchParams }: { searchParams: SearchParams
           onSet={setProxyAction.bind(null, activeBrand.id)}
           onToggle={toggleProxyAction.bind(null, activeBrand.id)}
           onClear={clearProxyAction.bind(null, activeBrand.id)}
+          onTest={testProxyAction.bind(null, activeBrand.id)}
         />
       </Section>
     </div>

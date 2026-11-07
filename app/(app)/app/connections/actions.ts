@@ -9,6 +9,7 @@ import {
   listShopifyTemplates,
   setBrandProxy,
   setShopifyTemplate,
+  testBrandProxy,
   toggleBrandProxy,
 } from "@/lib/services";
 import type { ConnectionKind, ShopifyTemplatesDTO } from "@/lib/services/types";
@@ -52,6 +53,11 @@ export async function setProxyAction(brandId: string, url: string) {
 
 export async function toggleProxyAction(brandId: string, enabled: boolean) {
   return done(await runAction((ctx) => toggleBrandProxy(ctx, brandId, enabled)));
+}
+
+/** Read-only check: returns the route and exit IP, no refresh needed. */
+export async function testProxyAction(brandId: string) {
+  return runAction((ctx) => testBrandProxy(ctx, brandId));
 }
 
 export async function clearProxyAction(brandId: string) {

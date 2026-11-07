@@ -980,6 +980,30 @@ export interface Copywriter {
 /* Registry                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* Proxy check                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which network path a brand's outbound requests take, and the public IP the
+ * outside world sees. `simulated` is true in mock mode (no network).
+ */
+export const proxyCheckResultSchema = z.object({
+  route: z.enum(["proxy", "direct"]),
+  /** "http" | "socks5" when routed through the proxy. */
+  proxyKind: z.enum(["http", "socks5"]).nullable(),
+  /** Public IP seen by the target site. */
+  exitIp: z.string().min(1),
+  latencyMs: z.number().int().nonnegative(),
+  simulated: z.boolean(),
+});
+export type ProxyCheckResult = z.infer<typeof proxyCheckResultSchema>;
+
+export interface ProxyChecker {
+  /** One request through the CallContext network path (brand proxy or direct). */
+  check(ctx: CallContext): Promise<ProxyCheckResult>;
+}
+
 /** What lib/integrations/index.ts resolves for the current INTEGRATIONS_MODE. */
 export interface Integrations {
   mode: IntegrationsMode;
@@ -991,4 +1015,5 @@ export interface Integrations {
   supplierFinder: SupplierFinder;
   complianceChecker: ComplianceChecker;
   copywriter: Copywriter;
+  proxyChecker: ProxyChecker;
 }

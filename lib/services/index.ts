@@ -18,6 +18,7 @@ export {
   getBrand,
   listBrands,
   setBrandProxy,
+  testBrandProxy,
   toggleBrandProxy,
   updateBrand,
   type BrandPatchInput,

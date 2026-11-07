@@ -4,7 +4,7 @@ import { useState, useTransition, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import type { BrandProxyDTO } from "@/lib/services/types";
+import type { BrandProxyCheckDTO, BrandProxyDTO } from "@/lib/services/types";
 
 import type { ActionResult } from "../action-result";
 import { ConfirmDialog } from "../confirm-dialog";
@@ -20,17 +20,34 @@ export function ProxyPanel({
   onSet,
   onToggle,
   onClear,
+  onTest,
 }: {
   proxy: BrandProxyDTO;
   canEdit: boolean;
   onSet: (url: string) => Promise<ActionResult>;
   onToggle: (enabled: boolean) => Promise<ActionResult>;
   onClear: () => Promise<ActionResult>;
+  onTest: () => Promise<ActionResult<BrandProxyCheckDTO>>;
 }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState(!proxy.configured);
+  const [check, setCheck] = useState<BrandProxyCheckDTO | null>(null);
+
+  function test() {
+    setError(null);
+    setNotice(null);
+    setCheck(null);
+    startTransition(async () => {
+      const result = await onTest();
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      setCheck(result.data);
+    });
+  }
 
   function run(fn: () => Promise<ActionResult>, success: string, after?: () => void) {
     setError(null);
@@ -119,6 +136,16 @@ export function ProxyPanel({
         </form>
       ) : null}
 
+      {canEdit && !editing ? (
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="lg" onClick={test} disabled={pending} aria-busy={pending}>
+            {pending ? "Testing…" : "Test proxy"}
+          </Button>
+        </div>
+      ) : null}
+
+      {check ? <ProxyCheckResult check={check} /> : null}
+
       {canEdit && proxy.configured && !editing ? (
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="lg" onClick={() => setEditing(true)} disabled={pending}>
@@ -146,6 +173,38 @@ export function ProxyPanel({
 
       <FormError message={error} />
       <FormSuccess message={notice} />
+    </div>
+  );
+}
+
+function ProxyCheckResult({ check }: { check: BrandProxyCheckDTO }) {
+  const viaProxy = check.route === "proxy";
+  const rows: [string, string][] = [
+    ["Route", viaProxy ? `Through the proxy (${check.proxyKind ?? "http"})` : "Direct, no proxy"],
+    ["IP seen by target sites", check.exitIp],
+    ["Latency", `${check.latencyMs} ms`],
+  ];
+  return (
+    <div
+      role="status"
+      className="grid gap-2 rounded-xl border border-border bg-background p-4 text-sm"
+    >
+      <p className="font-medium">
+        {viaProxy ? "Requests for this brand go through the proxy." : "Requests go out directly."}
+        {check.simulated ? (
+          <span className="ml-2 rounded-md bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">
+            Simulated (mock mode)
+          </span>
+        ) : null}
+      </p>
+      <dl className="grid gap-1 sm:grid-cols-[max-content_1fr] sm:gap-x-4">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="font-mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

@@ -29,6 +29,17 @@ export type BrandProxyDTO = {
   updatedAt: ISODate | null;
 };
 
+/** Result of a proxy test (see testBrandProxy). Never carries the proxy URL. */
+export type BrandProxyCheckDTO = {
+  route: "proxy" | "direct";
+  proxyKind: "http" | "socks5" | null;
+  exitIp: string;
+  latencyMs: number;
+  /** True in mock mode: no request left the server. */
+  simulated: boolean;
+  checkedAt: ISODate;
+};
+
 export type BrandDTO = {
   id: string;
   name: string;
