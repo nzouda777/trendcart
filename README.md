@@ -59,7 +59,7 @@ Before committing: `pnpm lint` and `pnpm build` must pass with no warnings.
 
 | Name                   | Required | Description                                                                                               |
 | ---------------------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_SITE_URL` | No       | Public site URL (metadata, OG images, sitemap). Falls back to `https://trendcart.app`. No trailing slash. |
+| `NEXT_PUBLIC_SITE_URL` | No       | Public site URL (metadata, OG images, sitemap). Falls back to `https://usetrendcart.com`. No trailing slash. |
 
 The product app needs more variables: every one is documented in `.env.example`, and the
 production list is in [docs/operations.md](docs/operations.md).
@@ -67,7 +67,7 @@ production list is in [docs/operations.md](docs/operations.md).
 ## Deploy on Vercel
 
 1. Import the repository in Vercel (framework preset: Next.js, package manager: pnpm is auto-detected).
-2. Set `NEXT_PUBLIC_SITE_URL` to the production domain (e.g. `https://trendcart.app`).
+2. Set `NEXT_PUBLIC_SITE_URL` to the production domain (e.g. `https://usetrendcart.com`).
 3. Deploy. The landing alone needs no other configuration. The product app needs the variables in
    [docs/operations.md](docs/operations.md), with `INTEGRATIONS_MODE=live` in production, and
    `pnpm db:migrate` run against the Neon database before each deploy.

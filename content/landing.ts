@@ -494,7 +494,7 @@ export const landing = {
         links: [
           { label: "Privacy policy", href: siteConfig.links.privacy },
           { label: "Terms of service", href: siteConfig.links.terms },
-          { label: "Cookie policy", href: `${siteConfig.links.privacy}#cookies` },
+          { label: "Cookie policy", href: siteConfig.links.cookies },
         ],
       },
     ],

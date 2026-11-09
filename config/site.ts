@@ -3,7 +3,9 @@
  * URLs or socials elsewhere — import `siteConfig` instead.
  */
 
-const FALLBACK_URL = "https://trendcart.app";
+/** Public production URL. Used in legal texts, which must never show a dev or preview host. */
+const CANONICAL_URL = "https://usetrendcart.com";
+const FALLBACK_URL = CANONICAL_URL;
 
 function resolveSiteUrl(): string {
   const raw = process.env.NEXT_PUBLIC_SITE_URL?.trim();
@@ -20,18 +22,27 @@ export type SocialLink = {
 
 export const siteConfig = {
   name: "Trendcart",
+  /** Logo wordmark, rendered "TREND CART" with the second word in brand green. */
+  wordmark: { lead: "Trend", accent: "Cart" },
   tagline: "From trend to cart.",
-  /** Absolute site URL without a trailing slash. */
+  /**
+   * Absolute URL of the current deployment (NEXT_PUBLIC_SITE_URL), without a
+   * trailing slash. Can be localhost or a preview host: use it for auth and
+   * metadata, not in user-facing text.
+   */
   url: resolveSiteUrl(),
+  /** Public production URL, always https://usetrendcart.com. Use it in user-facing text. */
+  canonicalUrl: CANONICAL_URL,
   links: {
     home: "/",
     signIn: "/sign-in",
     signUp: "/sign-up",
     privacy: "/privacy",
     terms: "/terms",
+    cookies: "/cookies",
   },
   /**
-   * Who operates the service, shown on /privacy and /terms (required by
+   * Who operates the service, shown on /privacy, /terms and /cookies (required by
    * TikTok and Shopify app review).
    * TODO: fill in the legal entity, contact email and country before
    * submitting the TikTok or Shopify apps. Empty values are left out of the
@@ -46,8 +57,8 @@ export const siteConfig = {
     contactEmail: "",
     /** Country whose law governs the terms, e.g. "France". */
     governingLaw: "",
-    /** Shown at the top of both pages; update when their content changes. */
-    lastUpdated: "November 5, 2026",
+    /** Shown at the top of the three legal pages; update when their content changes. */
+    lastUpdated: "November 9, 2026",
   },
   // TODO: replace with the real handles once the accounts exist.
   socials: [

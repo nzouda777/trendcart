@@ -9,12 +9,12 @@ import type { LegalDocument } from "@/content/legal";
 import { Footer } from "./footer";
 
 /** Contact lines from siteConfig.legal; empty values are left out, never invented. */
-function Contact() {
+function Contact({ number }: { number: number }) {
   const { operator, address, contactEmail } = siteConfig.legal as Record<string, string>;
   return (
     <section aria-labelledby="contact" className="scroll-mt-24">
       <h2 id="contact" className="text-xl font-semibold tracking-tight">
-        Contact
+        {number}. Contact
       </h2>
       <p className="mt-3 text-muted-foreground">
         {siteConfig.name} is operated by {operator || siteConfig.name}
@@ -37,15 +37,12 @@ function Contact() {
   );
 }
 
-/** Shared layout for /privacy and /terms: header, title, table of contents, sections, footer. */
-export function LegalPage({
-  document,
-  extra,
-}: {
-  document: LegalDocument;
-  /** Rendered after the last section, before Contact. */
-  extra?: React.ReactNode;
-}) {
+/**
+ * Shared layout for /privacy, /terms and /cookies: header, title, table of
+ * contents, numbered sections, a final numbered Contact section, footer.
+ */
+export function LegalPage({ document }: { document: LegalDocument }) {
+  const contactNumber = document.sections.length + 1;
   return (
     <>
       <header className="mx-auto flex h-16 w-full max-w-content items-center justify-between px-5 sm:px-6 lg:px-8">
@@ -71,29 +68,29 @@ export function LegalPage({
 
         <nav aria-label="On this page" className="mt-8 rounded-lg border bg-surface/40 p-5">
           <ol className="grid gap-2 text-sm sm:grid-cols-2">
-            {document.sections.map((s) => (
+            {document.sections.map((s, i) => (
               <li key={s.id}>
                 <a
                   href={`#${s.id}`}
                   className="rounded-sm text-muted-foreground hover:text-foreground"
                 >
-                  {s.title}
+                  {i + 1}. {s.title}
                 </a>
               </li>
             ))}
             <li>
               <a href="#contact" className="rounded-sm text-muted-foreground hover:text-foreground">
-                Contact
+                {contactNumber}. Contact
               </a>
             </li>
           </ol>
         </nav>
 
         <div className="mt-10 flex flex-col gap-10">
-          {document.sections.map((section) => (
+          {document.sections.map((section, index) => (
             <section key={section.id} aria-labelledby={section.id} className="scroll-mt-24">
               <h2 id={section.id} className="text-xl font-semibold tracking-tight">
-                {section.title}
+                {index + 1}. {section.title}
               </h2>
               <div className="mt-3 flex flex-col gap-3 text-muted-foreground">
                 {section.blocks.map((block, i) =>
@@ -114,8 +111,7 @@ export function LegalPage({
               </div>
             </section>
           ))}
-          {extra}
-          <Contact />
+          <Contact number={contactNumber} />
         </div>
       </main>
       <Footer />

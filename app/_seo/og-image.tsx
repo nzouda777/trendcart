@@ -23,9 +23,9 @@ const STEPS = ["TikTok post", "Shopify page", "TikTok ad campaign"] as const;
 
 function siteHost(): string {
   try {
-    return new URL(siteConfig.url).host;
+    return new URL(siteConfig.canonicalUrl).host;
   } catch {
-    return siteConfig.url;
+    return siteConfig.canonicalUrl;
   }
 }
 
@@ -57,7 +57,7 @@ async function loadGeist(text: string): Promise<OgFont[] | undefined> {
 
 export async function renderOgImage(): Promise<ImageResponse> {
   const host = siteHost();
-  const allText = [siteConfig.name, siteConfig.tagline, host, ...STEPS, "→"].join("");
+  const allText = [siteConfig.name, siteConfig.wordmark.lead.toUpperCase(), siteConfig.wordmark.accent.toUpperCase(), siteConfig.tagline, host, ...STEPS, "→"].join("");
   const fonts = await loadGeist(allText);
   const iconSrc = `data:image/svg+xml,${encodeURIComponent(getLogoIconSvg({ size: 112 }))}`;
 
@@ -106,12 +106,15 @@ export async function renderOgImage(): Promise<ImageResponse> {
           style={{
             display: "flex",
             fontSize: 96,
+            gap: 28,
             fontWeight: 600,
-            letterSpacing: "-0.04em",
+            letterSpacing: "0.01em",
             lineHeight: 1,
+            textTransform: "uppercase",
           }}
         >
-          {siteConfig.name}
+          <span>{siteConfig.wordmark.lead}</span>
+          <span style={{ color: GREEN }}>{siteConfig.wordmark.accent}</span>
         </div>
       </div>
 

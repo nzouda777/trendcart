@@ -2,7 +2,7 @@
 
 Everything here is only needed with `INTEGRATIONS_MODE=live`. In mock mode no account is
 required (see [setup.md](setup.md)). `<site>` below is your public origin, for example
-`https://trendcart.app`: set `NEXT_PUBLIC_SITE_URL` to exactly that value, because every OAuth
+`https://usetrendcart.com`: set `NEXT_PUBLIC_SITE_URL` to exactly that value, because every OAuth
 redirect URL is built from it and must match what you register with the provider.
 
 | Service                                   | Needed for                              | Env vars                                                        |

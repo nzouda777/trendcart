@@ -25,7 +25,7 @@ const defaultTitle = `${siteConfig.name} — ${siteConfig.tagline.replace(/\.$/,
 const description = `${siteConfig.name} takes a TikTok post or product link to a launch-ready TikTok ad campaign, with a Shopify product page built along the way.`;
 
 export const metadata: Metadata = {
-  metadataBase: new URL(siteConfig.url),
+  metadataBase: new URL(siteConfig.canonicalUrl),
   title: {
     default: defaultTitle,
     template: `%s — ${siteConfig.name}`,

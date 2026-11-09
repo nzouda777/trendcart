@@ -5,22 +5,16 @@ import { cn } from "@/lib/utils";
 
 /**
  * Raw logo geometry, shared with non-React consumers (favicon, apple icon,
- * OG image via `next/og`). An upward trend line that ends, arrow first,
- * inside a shopping bag. All shapes are strokes, in one solid color.
+ * OG image via `next/og`). An outlined lightning bolt, traced from
+ * `public/logo.jpeg`. One closed stroke, in one solid color.
  */
 export const LOGO_ICON = {
   viewBox: "0 0 32 32",
   size: 32,
   strokeWidth: 2.25,
   paths: {
-    /** Bag body (slightly tapered). */
-    bag: "M13 13h15l-1.2 14.2a2 2 0 0 1-2 1.8H16.2a2 2 0 0 1-2-1.8L13 13z",
-    /** Bag handle. */
-    handle: "M17 13v-2a4 4 0 0 1 8 0v2",
-    /** Trend line, rising into the bag. */
-    trend: "M3 24.5l4.5-5L11 23l8.5-8.5",
-    /** Arrow head at the end of the trend line. */
-    arrow: "M15.5 14.5h4v4",
+    /** Outlined lightning bolt, leaning right. */
+    bolt: "M21 2.5L7.5 18.5h7.25L11 29.5l14-16.25h-7.25L21 2.5z",
   },
   /**
    * Fixed brand greens for static renders (no CSS variables there).
@@ -30,12 +24,7 @@ export const LOGO_ICON = {
   colors: { onDark: "#95BF47", onLight: "#008060" },
 } as const;
 
-export const LOGO_ICON_PATHS = [
-  LOGO_ICON.paths.bag,
-  LOGO_ICON.paths.handle,
-  LOGO_ICON.paths.trend,
-  LOGO_ICON.paths.arrow,
-] as const;
+export const LOGO_ICON_PATHS = [LOGO_ICON.paths.bolt] as const;
 
 /**
  * Standalone SVG markup of the icon, for `app/icon.svg`, `ImageResponse`
@@ -93,22 +82,29 @@ export type LogoProps = {
   className?: string;
   iconClassName?: string;
   wordmarkClassName?: string;
-  /** Icon variant; the wordmark always uses the current text color. */
+  /** Icon variant; also drops the green from the wordmark when `mono`. */
   variant?: LogoIconVariant;
 };
 
-/** Icon + "Trendcart" wordmark (Geist Sans semibold). Wrap in a link where needed. */
+/**
+ * Bolt icon + "TREND CART" wordmark (bold, uppercase, second word in brand
+ * green). Screen readers get the plain brand name. Wrap in a link where needed.
+ */
 export function Logo({ className, iconClassName, wordmarkClassName, variant }: LogoProps) {
+  const { lead, accent } = siteConfig.wordmark;
   return (
     <span className={cn("inline-flex items-center gap-2 text-foreground", className)}>
       <LogoIcon variant={variant} className={iconClassName} />
       <span
         className={cn(
-          "font-sans text-lg leading-none font-semibold tracking-tight",
+          "font-sans text-lg leading-none font-bold tracking-wide uppercase",
           wordmarkClassName,
         )}
       >
-        {siteConfig.name}
+        <span className="sr-only">{siteConfig.name}</span>
+        <span aria-hidden="true">
+          {lead} <span className={cn(variant !== "mono" && "text-brand-text")}>{accent}</span>
+        </span>
       </span>
     </span>
   );
