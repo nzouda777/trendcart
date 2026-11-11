@@ -4,9 +4,10 @@ import { siteConfig } from "@/config/site";
 import { cn } from "@/lib/utils";
 
 /**
- * Raw logo geometry, shared with non-React consumers (favicon, apple icon,
- * OG image via `next/og`). An outlined lightning bolt, traced from
- * `public/logo.jpeg`. One closed stroke, in one solid color.
+ * Raw logo geometry, shared with non-React consumers (the OG image via
+ * `next/og`). An outlined lightning bolt, traced from `public/logo.jpeg`. One
+ * closed stroke, in one solid color. The favicons are image files in app/,
+ * made from `public/favicon-black.jpeg`.
  */
 export const LOGO_ICON = {
   viewBox: "0 0 32 32",
@@ -27,7 +28,7 @@ export const LOGO_ICON = {
 export const LOGO_ICON_PATHS = [LOGO_ICON.paths.bolt] as const;
 
 /**
- * Standalone SVG markup of the icon, for `app/icon.svg`, `ImageResponse`
+ * Standalone SVG markup of the icon, for `ImageResponse`
  * (`<img src={\`data:image/svg+xml,${encodeURIComponent(svg)}\`} />`) etc.
  * Stroke color defaults to the on-dark brand green; pass `color` to override
  * (e.g. `LOGO_ICON.colors.onLight` or `currentColor`).

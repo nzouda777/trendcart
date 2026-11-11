@@ -47,7 +47,7 @@ export const metadata: Metadata = {
     description,
   },
   // Images come from app/opengraph-image.tsx, app/twitter-image.tsx;
-  // icons from app/icon.svg, app/apple-icon.tsx, app/favicon.ico.
+  // icons from app/favicon.ico, app/icon.png, app/apple-icon.png (made from public/favicon-black.jpeg).
 };
 
 export const viewport: Viewport = {
