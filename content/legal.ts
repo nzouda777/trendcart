@@ -1,4 +1,4 @@
-import { siteConfig } from "@/config/site";
+import { getOperatorParty, siteConfig } from "@/config/site";
 
 /*
  * Privacy policy, terms of service and cookie policy. Plain data, rendered by
@@ -26,7 +26,7 @@ export type LegalDocument = {
 };
 
 const name = siteConfig.name;
-const operator: string = siteConfig.legal.operator || name;
+const operator: string = getOperatorParty();
 const governingLaw: string = siteConfig.legal.governingLaw;
 /* Always the production domain, never the current deployment's host (localhost, previews). */
 const siteUrl = siteConfig.canonicalUrl;

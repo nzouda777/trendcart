@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { siteConfig } from "@/config/site";
+import { getOperatorNotice, siteConfig } from "@/config/site";
 import { landing } from "@/content/landing";
 import type { LegalDocument } from "@/content/legal";
 
@@ -10,15 +10,15 @@ import { Footer } from "./footer";
 
 /** Contact lines from siteConfig.legal; empty values are left out, never invented. */
 function Contact({ number }: { number: number }) {
-  const { operator, address, contactEmail } = siteConfig.legal as Record<string, string>;
+  const { address, contactEmail } = siteConfig.legal as Record<string, string>;
   return (
     <section aria-labelledby="contact" className="scroll-mt-24">
       <h2 id="contact" className="text-xl font-semibold tracking-tight">
         {number}. Contact
       </h2>
       <p className="mt-3 text-muted-foreground">
-        {siteConfig.name} is operated by {operator || siteConfig.name}
-        {address ? `, ${address}` : ""}.
+        {getOperatorNotice()}
+        {address ? ` Address: ${address}.` : ""}
         {contactEmail ? (
           <>
             {" "}

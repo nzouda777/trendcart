@@ -2,7 +2,7 @@ import Link from "next/link";
 import { siInstagram, siTiktok, siX, siYoutube, type SimpleIcon } from "simple-icons";
 
 import { Logo } from "@/components/brand/logo";
-import { siteConfig, type SocialLink } from "@/config/site";
+import { getOperatorNotice, siteConfig, type SocialLink } from "@/config/site";
 import { landing } from "@/content/landing";
 import { getCurrentYear } from "@/lib/current-year";
 
@@ -81,9 +81,26 @@ export async function Footer() {
         </div>
 
         <div className="mt-14 flex flex-col-reverse items-start gap-6 border-t pt-8 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm text-muted-foreground">
-            © {year} {siteConfig.name}. {footer.legalNote}
-          </p>
+          <div className="flex flex-col gap-2 text-sm text-muted-foreground">
+            <p>
+              © {year} {siteConfig.legal.businessName || siteConfig.name}. {footer.legalNote}
+            </p>
+            <p>
+              {getOperatorNotice()}
+              {siteConfig.legal.contactEmail ? (
+                <>
+                  {" "}
+                  Contact:{" "}
+                  <a
+                    href={`mailto:${siteConfig.legal.contactEmail}`}
+                    className="rounded-sm underline-offset-4 hover:text-foreground hover:underline"
+                  >
+                    {siteConfig.legal.contactEmail}
+                  </a>
+                </>
+              ) : null}
+            </p>
+          </div>
           <ul aria-label={footer.socialsLabel} className="flex items-center gap-1">
             {siteConfig.socials.map((social) => (
               <li key={social.id}>
