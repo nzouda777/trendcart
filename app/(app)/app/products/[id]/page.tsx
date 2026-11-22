@@ -467,7 +467,7 @@ async function ProductDetail({ params, searchParams }: Props) {
         <Section
           id="videos"
           title="Videos"
-          description="Approved videos are on the Shopify product and used in the campaign. Post them to your TikTok profiles."
+          description="Approved videos are on the Shopify product and used in the campaign. Posting them to a TikTok profile is optional."
           actions={postsRefresh(product, role)}
         >
           <VideoLibrary product={product} role={role} open={false} />

@@ -337,11 +337,11 @@ async function BrandConnections({ brand, role }: { brand: BrandDTO; role: Role }
 
       <Section
         id="tiktok-profiles"
-        title="TikTok profiles"
-        description="Approved videos can be posted to these profiles. Posts stay private until TikTok's app audit is passed."
+        title="TikTok profiles (optional)"
+        description="Not needed to run ads: campaigns use the ad account above with the brand name as identity. Connect a profile only to post approved videos organically. Posts stay private until TikTok's app audit is passed."
         actions={
           canCreate ? (
-            <ConnectLink href={`/api/tiktok/login/connect?${q}`} variant="default">
+            <ConnectLink href={`/api/tiktok/login/connect?${q}`}>
               {data.tiktokProfiles.length > 0 ? "Add a profile" : "Connect a profile"}
             </ConnectLink>
           ) : undefined
@@ -384,7 +384,7 @@ async function BrandConnections({ brand, role }: { brand: BrandDTO; role: Role }
             as="h3"
             icon={UserRoundIcon}
             title="No profile connected"
-            description="Sign in with TikTok to post approved videos to a brand profile."
+            description="Optional. Ads work without it. Sign in with TikTok to also post approved videos to a brand profile."
             className="py-8"
           />
         )}

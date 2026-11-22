@@ -413,6 +413,27 @@ describe("M3 GATE 3 videos → GATE 4 → launch → stats (mock end to end)", (
     expect(launches).toHaveLength(2);
   }, 120_000);
 
+  it("a TikTok profile is optional: no profile connected, the campaign is prepared and launched", async () => {
+    await insertAdAccount();
+    const m = await atGate3PageApproved();
+    const { productId, deps, ads } = m;
+    expect(await env.a.owner.db.count(tiktokProfileConnection)).toBe(0);
+
+    const p0 = await getProductPipeline(env.a.viewer, productId);
+    expect(p0.tiktokProfiles).toEqual([]);
+    await approveVideo(env.a.creative, { productId, videoId: usable(p0)[0]!.id }, deps);
+    const ready = await approveVideos(env.a.media_buyer, { productId }, deps);
+    expect(ready.status).toBe("ready_to_launch");
+    const ids = ready.campaign!.tiktokIds!;
+    expect(ads.statusOf(ids.campaignId)).toBe("DISABLE");
+
+    const p = await launchCampaign(env.a.media_buyer, { productId }, deps);
+    expect(p.status).toBe("launched");
+    expect(p.campaign!.status).toBe("active");
+    expect(ads.statusOf(ids.campaignId)).toBe("ENABLE");
+    expect(p.approvals.filter((a) => a.gate === "launch")).toHaveLength(1);
+  }, 120_000);
+
   it("refuses the videos part without an approved video or an ad account", async () => {
     const m = await atGate3PageApproved();
     const { productId, deps } = m;

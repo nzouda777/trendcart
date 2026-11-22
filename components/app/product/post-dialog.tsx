@@ -113,7 +113,7 @@ export function PostToTikTokButton({
   }
   if (profiles.length === 0) {
     return (
-      <DisabledReason reason="Connect a TikTok profile to this brand first (Connections).">
+      <DisabledReason reason="Optional: connect a TikTok profile (Connections) to post this video organically. The campaign does not need it.">
         {trigger}
       </DisabledReason>
     );

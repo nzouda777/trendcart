@@ -160,10 +160,15 @@ async function Waiting({ brands }: { brands: BrandDTO[] }) {
 async function Health({ brand }: { brand: BrandDTO }) {
   const { ctx } = await getPageContext();
   const data = await listConnections(ctx, brand.id);
-  const groups: { label: string; items: { health: ConnectionHealth }[] }[] = [
+  const groups: {
+    label: string;
+    items: { health: ConnectionHealth }[];
+    optional?: boolean;
+  }[] = [
     { label: "Shopify", items: data.shopify },
     { label: "TikTok Ads", items: data.tiktokAds },
-    { label: "TikTok profiles", items: data.tiktokProfiles },
+    // Organic posting only: never needed to prepare or launch a campaign.
+    { label: "TikTok profiles", items: data.tiktokProfiles, optional: true },
   ];
   const rank: Record<ConnectionHealth, number> = { green: 0, orange: 1, red: 2 };
   return (
@@ -185,7 +190,9 @@ async function Health({ brand }: { brand: BrandDTO }) {
             {worst ? (
               <HealthBadge health={worst} />
             ) : (
-              <span className="text-xs text-muted-foreground">Not connected</span>
+              <span className="text-xs text-muted-foreground">
+                {g.optional ? "Optional" : "Not connected"}
+              </span>
             )}
           </li>
         );
