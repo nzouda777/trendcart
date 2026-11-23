@@ -14,7 +14,7 @@ local development, see [setup.md](setup.md).
 
 ## Production environment checklist (Vercel)
 
-Set these in the Vercel project for the Production environment:
+Set these in the Vercel project for the Production environment (step-by-step French version: [production-env.md](production-env.md)):
 
 | Variable                                                  | Notes                                                                                                         |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |

@@ -33,6 +33,34 @@ function baseURL() {
   return (process.env.BETTER_AUTH_URL?.trim() || siteConfig.url).replace(/\/+$/, "");
 }
 
+/**
+ * Origins allowed to call the auth API: the base URL, its www / apex twin
+ * (usetrendcart.com <-> www.usetrendcart.com), plus any comma-separated
+ * extras in BETTER_AUTH_TRUSTED_ORIGINS.
+ */
+export function trustedOrigins(url: string): string[] {
+  const origins = new Set<string>();
+  try {
+    const parsed = new URL(url);
+    origins.add(parsed.origin);
+    const isIp = /^[\d.]+$/.test(parsed.hostname) || parsed.hostname.includes(":");
+    if (parsed.hostname !== "localhost" && !isIp) {
+      const twin = new URL(parsed.origin);
+      twin.hostname = parsed.hostname.startsWith("www.")
+        ? parsed.hostname.slice(4)
+        : `www.${parsed.hostname}`;
+      origins.add(twin.origin);
+    }
+  } catch {
+    // Invalid base URL: Better Auth reports it itself.
+  }
+  for (const extra of (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "").split(",")) {
+    const value = extra.trim().replace(/\/+$/, "");
+    if (value) origins.add(value);
+  }
+  return [...origins];
+}
+
 async function firstWorkspaceId(db: Database, userId: string): Promise<string | null> {
   const rows = await db
     .select({ id: member.organizationId })
@@ -71,6 +99,7 @@ export function createAuth(db: Database) {
   return betterAuth({
     appName: siteConfig.name,
     baseURL: url,
+    trustedOrigins: trustedOrigins(url),
     secret: process.env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: "pg", schema: authSchema, transaction: true }),
     // Upstash-backed when configured (shared across instances), memory otherwise.
