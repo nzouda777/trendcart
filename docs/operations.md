@@ -49,7 +49,7 @@ reset is not implemented yet.
 
 | Path                               | Schedule                     | What it does                                                                                                                       |
 | ---------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `/api/cron/tiktok-token-refresh`   | `15 * * * *` (hourly, at :15) | Refreshes TikTok profile tokens that expire within 6 hours, up to 100 per run, each under a short lock so two runs never rotate the same token. |
+| `/api/cron/tiktok-token-refresh`   | `15 3 * * *` (daily, 03:15 UTC) | Refreshes TikTok profile tokens that expire within 6 hours, up to 100 per run, each under a short lock so two runs never rotate the same token. |
 
 Vercel sends `Authorization: Bearer $CRON_SECRET`. Check the run in Vercel's Cron logs; the
 JSON response counts `scanned`, `refreshed`, `revoked`, `failed`, `skipped`. `failed` rows hit a
@@ -125,7 +125,7 @@ and red (`needs_reauth`, `revoked`, `disconnected`, or active without a token). 
 | Shopify `customers/data_request`, `customers/redact`      | Acknowledged with 200: Trendcart requests no customer scopes and stores no customer data.                                                                          | None.                                          |
 | Shopify token refresh fails (expired or revoked)          | Connection set to `needs_reauth` (red); the calling step fails with "reconnect the store".                                                                          | Click **Reconnect**, then retry the step.     |
 | TikTok profile refresh rejected (invalid or revoked grant) | Connection set to `needs_reauth`, audit entry `connection.update`.                                                                                                | Click **Reconnect** on the profile.           |
-| TikTok profile refresh, temporary error                   | Left unchanged, retried on the next hourly run.                                                                                                                     | Only if it keeps failing.                     |
+| TikTok profile refresh, temporary error                   | Left unchanged, retried on the next daily run.                                                                                                                     | Only if it keeps failing.                     |
 | Webhook with a bad or missing signature                   | 401, nothing read or written.                                                                                                                                       | None.                                          |
 
 ## Retrying a failed product step
