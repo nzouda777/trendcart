@@ -56,7 +56,7 @@ export default async function AdminSettingsPage() {
               required: true,
               placeholder: String(settings.yearlyMultiplier),
             }}
-            onConfirm={(v) => updateMultiplierAction(v)}
+            onConfirm={updateMultiplierAction}
           />
         }
       >

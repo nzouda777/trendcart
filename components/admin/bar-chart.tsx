@@ -11,15 +11,20 @@ import { useId, useState } from "react";
 export function BarChart({
   data,
   label,
-  format = (v) => String(v),
+  unit = "count",
   height = 160,
 }: {
   data: { key: string; label: string; value: number }[];
   /** Accessible name, e.g. "New users per day, last 30 days". */
   label: string;
-  format?: (v: number) => string;
+  /** How values read (a string, not a function: this is a client component). */
+  unit?: "count" | "usd";
   height?: number;
 }) {
+  const format = (v: number) =>
+    unit === "usd"
+      ? v.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 })
+      : v.toLocaleString("en-US");
   const id = useId();
   const [active, setActive] = useState<number | null>(null);
   const max = Math.max(1, ...data.map((d) => d.value));

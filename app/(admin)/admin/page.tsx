@@ -101,7 +101,7 @@ export default async function AdminDashboard() {
           {d.aiByMonth.length ? (
             <BarChart
               label="AI cost per month, last 6 months"
-              format={(v) => `$${v}`}
+              unit="usd"
               data={d.aiByMonth.map((m) => ({
                 key: m.month,
                 label: monthLabel(m.month),

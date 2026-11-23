@@ -61,7 +61,7 @@ export default async function EditPlanPage({
                 label="Sync with Stripe"
                 title="Sync this plan with Stripe?"
                 description="Updates the product, and creates new prices if the amounts changed (old prices are archived; current subscribers keep them)."
-                onConfirm={() => syncPlanAction(row.id)}
+                onConfirm={syncPlanAction.bind(null, row.id)}
               />
             ) : (
               <Pill tone="danger">Stripe not configured</Pill>
@@ -125,7 +125,7 @@ export default async function EditPlanPage({
           destructive
           title={`Delete ${row.name}?`}
           description="The plan and its Stripe product are removed (archived in Stripe). This cannot be undone."
-          onConfirm={() => deletePlanAction(row.id)}
+          onConfirm={deletePlanAction.bind(null, row.id)}
         />
       </Card>
     </div>

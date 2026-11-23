@@ -157,7 +157,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                     : "Adds days to the free trial or the grant."
                 }
                 input={{ label: "Days to add", type: "number", required: true }}
-                onConfirm={(v) => extendTrialAction(d.org.id, v)}
+                onConfirm={extendTrialAction.bind(null, d.org.id)}
               />
             ) : null}
             {sub && sub.source !== "stripe" && access ? (
@@ -167,7 +167,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                 title="End this free trial or grant now?"
                 description="The workspace loses access until it chooses a plan."
                 destructive
-                onConfirm={() => endAccessAction(d.org.id)}
+                onConfirm={endAccessAction.bind(null, d.org.id)}
               />
             ) : null}
             {sub?.source === "stripe" && access ? (
@@ -177,7 +177,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                   icon={<XCircleIcon aria-hidden="true" />}
                   title="Cancel at the end of the paid period?"
                   description="Stripe stops renewing it; access stays until the period ends."
-                  onConfirm={() => cancelSubscriptionAction(d.org.id, "period_end")}
+                  onConfirm={cancelSubscriptionAction.bind(null, d.org.id, "period_end")}
                 />
                 <ActionButton
                   label="Cancel now"
@@ -185,7 +185,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                   destructive
                   title="Cancel the Stripe subscription now?"
                   description="Access stops immediately. No refund is issued by Trendcart (do it in Stripe if needed)."
-                  onConfirm={() => cancelSubscriptionAction(d.org.id, "now")}
+                  onConfirm={cancelSubscriptionAction.bind(null, d.org.id, "now")}
                 />
               </>
             ) : null}
@@ -214,7 +214,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
               title="Set this workspace's monthly AI budget"
               description="Overrides the plan's AI budget. Leave empty to go back to the plan or the default."
               input={{ label: "USD per month", type: "number", placeholder: "Plan / default" }}
-              onConfirm={(v) => aiCapAction(d.org.id, v)}
+              onConfirm={aiCapAction.bind(null, d.org.id)}
             />
             {suspended ? (
               <ActionButton
@@ -222,7 +222,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                 icon={<PlayIcon aria-hidden="true" />}
                 title="Unsuspend this workspace?"
                 description="Its members can use the app again."
-                onConfirm={() => unsuspendAction(d.org.id)}
+                onConfirm={unsuspendAction.bind(null, d.org.id)}
               />
             ) : (
               <ActionButton
@@ -232,7 +232,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
                 title="Suspend this workspace?"
                 description="Members keep their accounts but cannot use the app (imports, approvals, launches). Running TikTok campaigns are not paused: pause them first if needed."
                 input={{ label: "Reason (shown to members)", placeholder: "Optional" }}
-                onConfirm={(v) => suspendAction(d.org.id, v)}
+                onConfirm={suspendAction.bind(null, d.org.id)}
               />
             )}
           </div>
@@ -344,7 +344,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
           title={`Delete ${d.org.name}?`}
           description="This cannot be undone. Type the workspace name to confirm."
           input={{ label: "Workspace name", required: true, placeholder: d.org.name }}
-          onConfirm={(v) => deleteWorkspaceAction(d.org.id, v)}
+          onConfirm={deleteWorkspaceAction.bind(null, d.org.id)}
         />
       </Card>
     </div>
