@@ -1,0 +1,1 @@
+ALTER TABLE "workspace_settings" ADD COLUMN "admin_ai_monthly_cap_usd" numeric(10, 2);

@@ -1,5 +1,6 @@
 import {
   Building2Icon,
+  CreditCardIcon,
   DownloadIcon,
   GaugeIcon,
   LayoutDashboardIcon,
@@ -33,6 +34,7 @@ export const APP_NAV: NavItem[] = [
   { href: "/app/connections", label: "Connections", icon: PlugIcon, permission: "connection:read" },
   { href: "/app/team", label: "Team", icon: UsersIcon, permission: "workspace:read" },
   { href: "/app/usage", label: "Usage", icon: GaugeIcon, permission: "usage:read" },
+  { href: "/app/billing", label: "Billing", icon: CreditCardIcon, permission: "workspace:read" },
   { href: "/app/settings", label: "Settings", icon: SettingsIcon, permission: "workspace:read" },
 ];
 

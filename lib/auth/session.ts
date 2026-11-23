@@ -93,5 +93,11 @@ export async function requireWorkspacePage(): Promise<UserWorkspaceContext> {
     else if (error instanceof NoWorkspaceError) failure = "workspace";
     else throw error;
   }
+  if (failure === "workspace") {
+    // Platform admins (created by `pnpm admin:create`) have no workspace: their home is /admin.
+    const session = await getSession();
+    if ((session?.user as { role?: string | null } | undefined)?.role === "admin")
+      redirect("/admin");
+  }
   redirect(failure === "signin" ? AUTH_PATHS.signIn : AUTH_PATHS.createWorkspace);
 }

@@ -1,4 +1,10 @@
 /** Auth-related routes. Safe for client and proxy imports. */
+/** Request header the proxy sets with the path (the app layout reads it for the billing wall). */
+export const PATH_HEADER = "x-trendcart-path";
+
+/** App pages a workspace without access can still open (billing, account security). */
+export const OPEN_WITHOUT_PLAN = ["/app/billing", "/app/account/security", "/app/guide"] as const;
+
 export const AUTH_PATHS = {
   signIn: "/sign-in",
   signUp: "/sign-up",
@@ -8,6 +14,9 @@ export const AUTH_PATHS = {
   /** Where signed-in users land. */
   home: "/app",
   security: "/app/account/security",
+  billing: "/app/billing",
+  /** In-app user guide, opened in a new tab. */
+  guide: "/app/guide",
 } as const;
 
 /** Path prefix of the authenticated product app. */

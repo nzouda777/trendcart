@@ -27,6 +27,7 @@ import { isShopifyMediaProcessing } from "@/lib/integrations/shopify/errors";
 import { currencyDecimals } from "@/lib/integrations/tiktok-ads";
 import { isPostingAudited, PUBLISH_CLAIM_STALE_MS } from "@/lib/integrations/tiktok-posting/config";
 import { assertNoMediaUrl, candidateVideoFields } from "@/lib/media/candidates";
+import { defaultPresetFor, loadPresetFor } from "./campaign-presets";
 import { deleteVideoMedia, shopifyVideoAlt, uploadApprovedVideo } from "@/lib/media/videos";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
@@ -351,6 +352,8 @@ const approveVideosSchema = z.object({
    * fetches no FX rates). Ignored when the currencies match.
    */
   fxRate: z.number().positive().finite().max(1_000_000).optional(),
+  /** "Brand new campaign" preset; absent = the brand default preset (or built-in settings). */
+  presetId: idSchema.optional(),
   note: z.string().trim().max(2000).optional(),
 });
 
@@ -451,20 +454,29 @@ export async function approveVideos(
       }
       fxRate = v.fxRate;
     }
-    if (brandRow.defaultTestBudget !== null && brandRow.defaultTestBudget > 0) {
+    const preset = v.presetId
+      ? await loadPresetFor(tx, { presetId: v.presetId, brandId: row.brandId, kind: "new_test" })
+      : await defaultPresetFor(tx, row.brandId, "new_test");
+    const presetBudget = preset?.settings.budget;
+    const testBudget = presetBudget?.amount ?? brandRow.defaultTestBudget;
+    if (testBudget !== null && testBudget > 0 && (presetBudget?.mode ?? "daily") === "daily") {
       const amount = advertiserBudget(
-        brandRow.defaultTestBudget,
+        testBudget,
         fxRate ?? 1,
         currencyDecimals(advertiserCurrency),
       );
-      const min = dailyBudgetMinimum("ad_group", advertiserCurrency);
+      const min = dailyBudgetMinimum(presetBudget?.level ?? "ad_group", advertiserCurrency);
       if (min !== undefined && amount < min) {
         const brandPart = fxRate
-          ? `${brandRow.defaultTestBudget} ${brandCurrency} = ${amount} ${advertiserCurrency}`
+          ? `${testBudget} ${brandCurrency} = ${amount} ${advertiserCurrency}`
           : `${amount} ${advertiserCurrency}`;
         throw new ServiceError(
           "precondition_failed",
-          `The daily test budget (${brandPart}) is under TikTok's minimum of ${min} ${advertiserCurrency}. Raise the brand default test budget.`,
+          `The daily test budget (${brandPart}) is under TikTok's minimum of ${min} ${advertiserCurrency}. ${
+            presetBudget?.amount
+              ? `Raise the budget of the preset "${preset!.name}".`
+              : "Raise the brand default test budget."
+          }`,
         );
       }
     }
@@ -484,6 +496,7 @@ export async function approveVideos(
         brandCurrency,
         advertiserCurrency,
         fxRate,
+        presetId: preset?.id ?? null,
       },
     });
     const complete = parts.page === "approved";

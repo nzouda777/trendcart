@@ -24,8 +24,11 @@ import { requestIdFor } from "./http";
  *   level "ad_group": campaign BUDGET_MODE_INFINITE, budget per ad group.
  *   Daily: SCHEDULE_FROM_NOW. Total: SCHEDULE_START_END over
  *   TOTAL_BUDGET_DAYS (the spec has no end date yet).
- * - placements: TikTok only (PLACEMENT_TYPE_NORMAL + PLACEMENT_TIKTOK),
- *   promotion_type WEBSITE, countries → location_ids (geo.ts).
+ * - placements: TikTok only (PLACEMENT_TYPE_NORMAL + PLACEMENT_TIKTOK, never
+ *   Pangle / Global App Bundle), promotion_type WEBSITE, countries →
+ *   location_ids (geo.ts). search_result_enabled, comment_disabled,
+ *   video_download_disabled and share_disabled are always sent explicitly;
+ *   languages, operating_systems, dayparting only when the preset sets them.
  *
  * THE INVARIANT: every create payload carries operation_status DISABLE.
  * TikTok defaults operation_status to ENABLE when it is omitted, so
@@ -138,6 +141,14 @@ export function adGroupCreateBody(
           ? "GENDER_FEMALE"
           : "GENDER_UNLIMITED",
     ...(group.ageGroups?.length ? { age_groups: group.ageGroups } : {}),
+    ...(group.languages?.length ? { languages: group.languages } : {}),
+    ...(group.operatingSystems?.length ? { operating_systems: group.operatingSystems } : {}),
+    ...(group.dayparting ? { dayparting: group.dayparting } : {}),
+    // Explicit, so TikTok's defaults never widen delivery on their own.
+    search_result_enabled: group.searchResults ?? false,
+    comment_disabled: group.commentsDisabled ?? false,
+    video_download_disabled: group.videoDownloadDisabled ?? false,
+    share_disabled: group.shareDisabled ?? false,
     budget_mode: budgetMode(spec.budget.mode),
     ...(perGroupBudget ? { budget: spec.budget.amount } : {}),
     schedule_type: total ? "SCHEDULE_START_END" : "SCHEDULE_FROM_NOW",
@@ -145,11 +156,11 @@ export function adGroupCreateBody(
     ...(total
       ? {
           schedule_end_time: tiktokDateTime(
-            new Date(now.getTime() + TOTAL_BUDGET_DAYS * 86_400_000),
+            new Date(now.getTime() + (spec.totalDays ?? TOTAL_BUDGET_DAYS) * 86_400_000),
           ),
         }
       : {}),
-    pacing: "PACING_MODE_SMOOTH",
+    pacing: group.pacing === "fast" ? "PACING_MODE_FAST" : "PACING_MODE_SMOOTH",
     optimization_goal: conversions ? "CONVERT" : "CLICK",
     billing_event: conversions ? "OCPM" : "CPC",
     ...(conversions ? { pixel_id: spec.pixelId, optimization_event: spec.optimizationEvent } : {}),

@@ -67,6 +67,22 @@ export {
 } from "./pipeline";
 export { launchCampaign, pauseCampaign, resumeCampaign, updateCampaignBudget } from "./campaigns";
 export {
+  duplicateCampaign,
+  launchDuplicate,
+  listCampaignDuplicates,
+  pauseDuplicate,
+  updateDuplicateBudget,
+  type CampaignDuplicateDTO,
+} from "./campaign-duplicates";
+export {
+  createCampaignPreset,
+  deleteCampaignPreset,
+  listCampaignPresets,
+  setDefaultCampaignPreset,
+  updateCampaignPreset,
+  type CampaignPresetDTO,
+} from "./campaign-presets";
+export {
   addVideo,
   approveVideo,
   approveVideos,

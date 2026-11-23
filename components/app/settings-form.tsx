@@ -31,6 +31,8 @@ type Props = {
   settings: SettingsFormValues;
   /** false renders the form read-only (role without workspace:update). */
   canEdit: boolean;
+  /** The plan's AI budget (the field cannot go above it) and a support override. */
+  aiCap?: { planMax: number | null; adminOverride: number | null };
   onSubmit: (values: WorkspaceSettingsInput) => Promise<ActionResult>;
 };
 
@@ -58,7 +60,7 @@ const stringOrNull = (raw: FormDataEntryValue | null) => {
 };
 
 /** Workspace AI settings: models, monthly budget and time limits. Empty = default. */
-export function SettingsForm({ settings, canEdit, onSubmit }: Props) {
+export function SettingsForm({ settings, canEdit, onSubmit, aiCap }: Props) {
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<ActionResult | null>(null);
   const [saved, setSaved] = useState(false);
@@ -187,10 +189,17 @@ export function SettingsForm({ settings, canEdit, onSubmit }: Props) {
             inputMode="decimal"
             min={0}
             step="1"
+            {...(aiCap?.planMax != null ? { max: aiCap.planMax } : {})}
             placeholder={String(settings.aiMonthlyCapUsd.defaultValue)}
             defaultValue={current(settings.aiMonthlyCapUsd)}
             suffix="USD"
-            hint="AI and paid search calls stop for the month once reached. 0 turns AI off."
+            hint={
+              aiCap?.adminOverride != null
+                ? `Set to ${aiCap.adminOverride} USD by Trendcart support: this value applies instead of yours.`
+                : aiCap?.planMax != null
+                  ? `AI and paid search calls stop for the month once reached. Your plan allows up to ${aiCap.planMax} USD. 0 turns AI off.`
+                  : "AI and paid search calls stop for the month once reached. 0 turns AI off."
+            }
             error={err("aiMonthlyCapUsd")}
             className="sm:col-span-2"
           />

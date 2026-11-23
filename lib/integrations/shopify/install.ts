@@ -1,6 +1,6 @@
 import "server-only";
 
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import { z } from "zod";
 
 import { writeAudit } from "@/lib/audit";
@@ -15,6 +15,7 @@ import { appCredentialsFor, clientSecretAad, tokenColumns } from "./credentials"
 import { shopifyError } from "./errors";
 import { normalizeShopDomain } from "./hmac";
 import type { ShopifyAdapter } from "./types";
+import { assertWithinLimit } from "@/lib/services/internal/entitlements";
 
 /*
  * Shopify connection install flow. Route handlers in app/api/shopify/* only
@@ -69,6 +70,10 @@ export async function startShopifyInstall(
   if (!shopDomain)
     throw shopifyError("invalid_input", "Enter a valid <shop>.myshopify.com domain.");
   await ctx.db.getById(brand, input.brandId);
+  // Plan limit: other stores of the workspace (reconnecting this one is free).
+  await assertWithinLimit(ctx, "stores", () =>
+    ctx.db.count(shopifyConnection, (t) => ne(t.shopDomain, shopDomain)),
+  );
 
   let connectionId: string | undefined;
   let app: { clientId: string; clientSecret: string } | undefined;

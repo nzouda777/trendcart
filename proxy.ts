@@ -1,6 +1,8 @@
 import { getSessionCookie } from "better-auth/cookies";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { PATH_HEADER } from "@/lib/auth/paths";
+
 /*
  * Optimistic auth gate for the product app (Next 16 "proxy", formerly
  * middleware.ts). It only checks that a session cookie exists, so signed-out
@@ -9,7 +11,11 @@ import { NextResponse, type NextRequest } from "next/server";
  * requireWorkspacePage() / getWorkspaceContext() and in every service.
  */
 export function proxy(request: NextRequest) {
-  if (getSessionCookie(request)) return NextResponse.next();
+  if (getSessionCookie(request)) {
+    const headers = new Headers(request.headers);
+    headers.set(PATH_HEADER, request.nextUrl.pathname);
+    return NextResponse.next({ request: { headers } });
+  }
 
   const url = request.nextUrl.clone();
   const next = `${request.nextUrl.pathname}${request.nextUrl.search}`;
@@ -19,6 +25,6 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Marketing pages, auth pages and /api/auth stay public.
-  matcher: ["/app", "/app/:path*"],
+  // Marketing pages, auth pages, /api/auth and webhooks stay public.
+  matcher: ["/app", "/app/:path*", "/admin", "/admin/:path*"],
 };

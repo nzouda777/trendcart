@@ -143,7 +143,9 @@ describe("import boundaries", () => {
   });
 
   it("only foundation layers import lib/db/client", () => {
-    const allowed = /^lib\/(db|auth|tenant|audit)\//;
+    // lib/platform: platform admin services (behind requirePlatformAdmin), the
+    // Stripe webhook and the public pricing loader: cross-workspace by design.
+    const allowed = /^lib\/(db|auth|tenant|audit|platform)\//;
     const offenders = everything
       .filter((f) => /@\/lib\/db\/client|\.\/client["']/.test(read(f)))
       .map(rel)
@@ -186,6 +188,14 @@ describe("import boundaries", () => {
       "lib/services/connections.ts",
       "lib/services/products.ts",
       "lib/services/internal/credentials.ts",
+      "lib/services/internal/entitlements.ts",
+      "lib/services/billing.ts",
+      "lib/platform/guard.ts",
+      "lib/platform/stripe.ts",
+      "lib/platform/plans.ts",
+      "lib/platform/stripe-webhook.ts",
+      "lib/platform/workspaces.ts",
+      "lib/platform/users.ts",
       "lib/workflows/call-context.ts",
       "app/api/tiktok/_lib/connect.ts",
       "app/api/cron/tiktok-token-refresh/refresh.ts",
@@ -277,6 +287,9 @@ describe("role checks on every exported service", () => {
       "quoteSupplierChoice",
       // Workspace settings are readable by every member (AI models and caps).
       "getWorkspaceSettings",
+      // Campaign presets and duplicates are campaign:read (viewers included).
+      "listCampaignPresets",
+      "listCampaignDuplicates",
     ]);
     // Usage is media buyer+ (cost data), so viewers are refused there too.
     for (const [name, fn] of fns.filter(([n]) => !reads.has(n))) {

@@ -16,6 +16,7 @@ import { resolveIntegrations, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
 import { isPublicHost } from "./net";
 import type { BrandDTO, BrandProxyCheckDTO, BrandProxyDTO } from "./types";
+import { assertWithinLimit } from "./internal/entitlements";
 
 /* Schemas ------------------------------------------------------------------ */
 
@@ -155,6 +156,7 @@ export async function createBrand(
 ): Promise<BrandDTO> {
   requirePermission(ctx, "brand:create");
   const values = brandSettingsSchema.parse(input);
+  await assertWithinLimit(ctx, "brands", () => ctx.db.count(brand));
   const row = await ctx.db.transaction(async (tx) => {
     const created = await tx.insert(brand, {
       name: values.name,

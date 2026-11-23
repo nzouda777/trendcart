@@ -1,3 +1,4 @@
+import { BookOpenIcon, ExternalLinkIcon } from "lucide-react";
 import Link from "next/link";
 import { Suspense } from "react";
 
@@ -73,7 +74,18 @@ export function SidebarContent() {
       <Suspense fallback={<SidebarNavFallback />}>
         <RoleNav />
       </Suspense>
-      <div className="mt-auto border-t border-border pt-3">
+      <div className="mt-auto grid gap-2 border-t border-border pt-3">
+        <a
+          href={AUTH_PATHS.guide}
+          target="_blank"
+          rel="noopener"
+          className="flex items-center gap-2.5 rounded-lg px-2 py-2 text-sm text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          <BookOpenIcon aria-hidden="true" className="size-4" />
+          <span className="flex-1">User guide</span>
+          <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
+          <span className="sr-only">(opens in a new tab)</span>
+        </a>
         <Suspense fallback={<div className="h-12 animate-pulse rounded-lg bg-surface-2" />}>
           <User />
         </Suspense>

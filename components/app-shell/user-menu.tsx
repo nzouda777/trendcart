@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOutIcon, MoonIcon, ShieldCheckIcon, SunIcon } from "lucide-react";
+import { BookOpenIcon, LogOutIcon, MoonIcon, ShieldCheckIcon, SunIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
@@ -60,6 +60,13 @@ export function UserMenu({ name, email, role }: { name: string; email: string; r
             <ShieldCheckIcon aria-hidden="true" />
             Security and two-factor
           </Link>
+        </MenuItem>
+        <MenuItem asChild>
+          <a href={AUTH_PATHS.guide} target="_blank" rel="noopener">
+            <BookOpenIcon aria-hidden="true" />
+            User guide
+            <span className="sr-only"> (opens in a new tab)</span>
+          </a>
         </MenuItem>
         <MenuItem onSelect={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
           <SunIcon aria-hidden="true" className="hidden dark:block" />

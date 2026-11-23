@@ -5,8 +5,12 @@ import { refresh } from "next/cache";
 import type { ActionResult } from "@/components/app/action-result";
 import { BUDGET_UNSUPPORTED } from "@/components/app/product/action-markers";
 import {
+  duplicateCampaign,
   launchCampaign,
+  launchDuplicate,
   pauseCampaign,
+  pauseDuplicate,
+  updateDuplicateBudget,
   resumeCampaign,
   updateCampaignBudget,
   type ServiceFailure,
@@ -119,4 +123,53 @@ export async function updateCampaignBudgetAction(
     forbidden: CAMPAIGN_FORBIDDEN,
     conflict: "The campaign changed in the meantime. The screen was refreshed: try again.",
   });
+}
+
+/* Duplicates -------------------------------------------------------------- */
+
+/** Copies a launched campaign into a new PAUSED one with a "duplicate" preset. */
+export async function duplicateCampaignAction(
+  campaignId: string,
+  input: { presetId?: string },
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await duplicateCampaign(ctx, { campaignId, presetId: input.presetId || undefined });
+    return undefined;
+  });
+  if (result.ok) refresh();
+  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+}
+
+/** Launches (or resumes) a paused duplicate: the human approval to spend. */
+export async function launchDuplicateAction(
+  campaignId: string,
+  input: { note?: string } = {},
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await launchDuplicate(ctx, { campaignId, note: input.note?.trim() || undefined });
+    return undefined;
+  });
+  refresh();
+  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+}
+
+export async function pauseDuplicateAction(campaignId: string): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await pauseDuplicate(ctx, { campaignId });
+    return undefined;
+  });
+  refresh();
+  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
+}
+
+export async function updateDuplicateBudgetAction(
+  campaignId: string,
+  input: { amount: number },
+): Promise<ActionResult> {
+  const result = await runAction(async (ctx) => {
+    await updateDuplicateBudget(ctx, { campaignId, amount: input.amount });
+    return undefined;
+  });
+  if (result.ok) refresh();
+  return explain(result, { forbidden: CAMPAIGN_FORBIDDEN });
 }

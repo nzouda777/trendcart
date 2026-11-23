@@ -42,6 +42,7 @@ import { PageTemplatePanel } from "@/components/app/product/page-template-panel"
 import { pagePartState } from "@/components/app/product/page-state";
 import { RefreshPostsButton } from "@/components/app/product/post-dialog";
 import { SupplierChoice } from "@/components/app/product/supplier-choice";
+import { DuplicatesPanel } from "@/components/app/product/campaign-duplicates";
 import { VideoReview } from "@/components/app/product/video-review";
 import { STEP_LABELS, whoApproves } from "@/components/app/product-status";
 import { ProductThumb } from "@/components/app/product-thumb";
@@ -55,7 +56,13 @@ import {
   stepBackTarget,
   stepForStatus,
 } from "@/lib/domain/state-machine";
-import { getProductPipeline, quoteSupplierChoice, toServiceFailure } from "@/lib/services";
+import {
+  getProductPipeline,
+  listCampaignDuplicates,
+  listCampaignPresets,
+  quoteSupplierChoice,
+  toServiceFailure,
+} from "@/lib/services";
 import type {
   CampaignDTO,
   GatePartState,
@@ -83,10 +90,14 @@ import {
   updatePageCopyAction,
 } from "./actions";
 import {
+  duplicateCampaignAction,
   launchCampaignAction,
+  launchDuplicateAction,
   pauseCampaignAction,
+  pauseDuplicateAction,
   resumeCampaignAction,
   updateCampaignBudgetAction,
+  updateDuplicateBudgetAction,
 } from "./campaign-actions";
 import {
   addVideoAction,
@@ -350,6 +361,10 @@ async function ProductDetail({ params, searchParams }: Props) {
 
       {product.status === "launched" && product.campaign ? (
         <CampaignResults product={product} campaign={product.campaign} role={role} />
+      ) : null}
+
+      {product.status === "launched" && product.campaign ? (
+        <CampaignDuplicates product={product} campaign={product.campaign} role={role} />
       ) : null}
 
       {product.status === "preparing_campaign" ? (
@@ -736,7 +751,7 @@ function postsRefresh(product: ProductPipelineDTO, role: Role) {
   return <RefreshPostsButton onRefresh={refreshTikTokPostsAction.bind(null, product.id)} />;
 }
 
-function VideoLibrary({
+async function VideoLibrary({
   product,
   role,
   open,
@@ -745,6 +760,11 @@ function VideoLibrary({
   role: Role;
   open: boolean;
 }) {
+  const { ctx } = await getPageContext();
+  const presets =
+    open && can(role, "campaign:read")
+      ? await listCampaignPresets(ctx, { brandId: product.brandId, kind: "new_test" })
+      : [];
   return (
     <VideoReview
       videos={product.videos}
@@ -758,6 +778,7 @@ function VideoLibrary({
       canPublish={can(role, "video:publish")}
       approverLabel={whoApproves("content_approval")}
       adAccounts={product.adAccounts}
+      campaignPresets={presets.map((p) => ({ id: p.id, name: p.name, isDefault: p.isDefault }))}
       chosenAdConnectionId={product.videosChoice?.adConnectionId ?? null}
       profiles={product.tiktokProfiles}
       postingAudited={product.postingAudited}
@@ -939,6 +960,45 @@ function CampaignResults({
           </div>
         </details>
       </div>
+    </Section>
+  );
+}
+
+/** Paused copies of the launched campaign, built from the brand's "duplicate" presets. */
+async function CampaignDuplicates({
+  product,
+  campaign,
+  role,
+}: {
+  product: ProductPipelineDTO;
+  campaign: CampaignDTO;
+  role: Role;
+}) {
+  const { ctx } = await getPageContext();
+  const [duplicates, presets] = await Promise.all([
+    listCampaignDuplicates(ctx, product.id),
+    listCampaignPresets(ctx, { brandId: product.brandId, kind: "duplicate" }),
+  ]);
+  return (
+    <Section
+      id="duplicates"
+      title="Duplicates"
+      description="Copy this campaign with one of your saved duplicate settings, for example to scale a winner. Each copy is created paused and only spends once you launch it."
+    >
+      <DuplicatesPanel
+        sourceCampaignId={campaign.id}
+        sourceLaunched={!!campaign.launchedAt}
+        duplicates={duplicates}
+        presets={presets.map((p) => ({ id: p.id, name: p.name, isDefault: p.isDefault }))}
+        canDuplicate={can(role, "campaign:create")}
+        canLaunch={can(role, "campaign:launch")}
+        canPause={can(role, "campaign:pause")}
+        canBudget={can(role, "campaign:budget")}
+        onDuplicate={duplicateCampaignAction}
+        onLaunch={launchDuplicateAction}
+        onPause={pauseDuplicateAction}
+        onBudget={updateDuplicateBudgetAction}
+      />
     </Section>
   );
 }

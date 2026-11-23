@@ -114,6 +114,7 @@ const approveVideosInput = z.object({
   adConnectionId: z.string().trim().min(1).optional(),
   /** 1 brand unit = fxRate advertiser units (only when the currencies differ). */
   fxRate: z.number().positive().finite().max(1_000_000).optional(),
+  presetId: z.string().trim().min(1).optional(),
   note: z.string().max(2000).optional(),
 });
 
@@ -124,7 +125,7 @@ const approveVideosInput = z.object({
  */
 export async function approveVideosAction(
   productId: string,
-  input: { adConnectionId?: string; fxRate?: number; note?: string },
+  input: { adConnectionId?: string; fxRate?: number; presetId?: string; note?: string },
 ): Promise<ActionResult> {
   const parsed = approveVideosInput.safeParse(input);
   if (!parsed.success) {
@@ -143,6 +144,7 @@ export async function approveVideosAction(
       productId,
       adConnectionId: parsed.data.adConnectionId,
       ...(parsed.data.fxRate !== undefined ? { fxRate: parsed.data.fxRate } : {}),
+      ...(parsed.data.presetId ? { presetId: parsed.data.presetId } : {}),
       note: optionalText(parsed.data.note),
     });
     return undefined;

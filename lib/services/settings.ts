@@ -1,18 +1,44 @@
 import "server-only";
 
+import { aiCapParts, planAiCap } from "@/lib/ai/metering";
 import { requirePermission } from "@/lib/auth/guards";
 import { writeAudit } from "@/lib/audit";
 import { workspaceSettings } from "@/lib/db/schema";
 import { workspaceSettingsInputSchema, type WorkspaceSettingsInput } from "@/lib/domain/settings";
 import { effectiveSettings, getSettingsRow, type EffectiveSettings } from "@/lib/settings";
 import { actorUserId, type WorkspaceContext } from "@/lib/tenant/context";
+import type { ScopedDb } from "@/lib/tenant/scoped-db";
+
+import { ServiceError } from "./errors";
 
 /**
  * Workspace settings: AI models, monthly AI budget and AI time limits.
  * Everyone in the workspace can read them; only owners can change them.
  */
 
-export type WorkspaceSettingsDTO = EffectiveSettings;
+export type WorkspaceSettingsDTO = EffectiveSettings & {
+  aiCap: {
+    /** The subscribed plan's AI budget: the owner cannot go above it. Null: no plan cap. */
+    planMax: number | null;
+    /** Set by Trendcart support: wins over the owner's value. */
+    adminOverride: number | null;
+  };
+};
+
+/** Effective settings with the AI budget resolved against the plan and the admin value. */
+async function withAiCap(db: ScopedDb, base: EffectiveSettings): Promise<WorkspaceSettingsDTO> {
+  const parts = await aiCapParts(db);
+  const defaultValue = parts.planCap ?? parts.defaultCap;
+  return {
+    ...base,
+    aiMonthlyCapUsd: {
+      value: parts.effective,
+      isDefault: parts.ownerCap === null && parts.adminCap === null,
+      defaultValue,
+    },
+    aiCap: { planMax: parts.planCap, adminOverride: parts.adminCap },
+  };
+}
 
 const FIELDS = [
   "analysisModel",
@@ -24,7 +50,7 @@ const FIELDS = [
 
 export async function getWorkspaceSettings(ctx: WorkspaceContext): Promise<WorkspaceSettingsDTO> {
   requirePermission(ctx, "workspace:read");
-  return effectiveSettings(await getSettingsRow(ctx.db));
+  return withAiCap(ctx.db, effectiveSettings(await getSettingsRow(ctx.db)));
 }
 
 /**
@@ -37,6 +63,16 @@ export async function updateWorkspaceSettings(
 ): Promise<WorkspaceSettingsDTO> {
   requirePermission(ctx, "workspace:update");
   const values = workspaceSettingsInputSchema.parse(input);
+  if (typeof values.aiMonthlyCapUsd === "number") {
+    const planMax = await planAiCap(ctx.db);
+    if (planMax !== null && values.aiMonthlyCapUsd > planMax) {
+      throw new ServiceError(
+        "invalid_input",
+        `Your plan allows a monthly AI budget of up to ${planMax} USD. Upgrade in Billing for more.`,
+        { reason: "plan_limit" },
+      );
+    }
+  }
   type Patch = Partial<Pick<typeof workspaceSettings.$inferInsert, (typeof FIELDS)[number]>>;
   const patch = Object.fromEntries(
     FIELDS.filter((k) => values[k] !== undefined).map((k) => [k, values[k] ?? null]),
@@ -71,5 +107,5 @@ export async function updateWorkspaceSettings(
     }
     return saved;
   });
-  return effectiveSettings(row);
+  return withAiCap(ctx.db, effectiveSettings(row));
 }

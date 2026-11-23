@@ -20,7 +20,7 @@ import "server-only";
  */
 import { eq, sql } from "drizzle-orm";
 
-import { usageMonthly, workspaceSettings } from "@/lib/db/schema";
+import { usageMonthly, workspaceSettings, workspaceSubscription } from "@/lib/db/schema";
 import {
   aiUsageSchema,
   IntegrationError,
@@ -43,6 +43,53 @@ export function getAiMonthlyCapUsd(
     throw new Error("AI_MONTHLY_CAP_USD must be a non-negative number (0 disables AI calls).");
   }
   return value;
+}
+
+/**
+ * The monthly AI budget that applies (pure):
+ * 1. a platform admin's value (may exceed the plan);
+ * 2. else the owner's value, capped at the plan's budget;
+ * 3. else the plan's budget;
+ * 4. else the AI_MONTHLY_CAP_USD default.
+ */
+export function resolveAiCap(input: {
+  adminCap: number | null;
+  ownerCap: number | null;
+  planCap: number | null;
+  defaultCap: number;
+}): number {
+  if (input.adminCap !== null) return input.adminCap;
+  if (input.planCap !== null) {
+    return input.ownerCap === null ? input.planCap : Math.min(input.ownerCap, input.planCap);
+  }
+  return input.ownerCap ?? input.defaultCap;
+}
+
+/** The AI budget of the workspace's subscribed plan, or null (none, or unlimited). */
+export async function planAiCap(db: ScopedDb): Promise<number | null> {
+  const sub = await db.findFirst(workspaceSubscription);
+  if (!sub?.planId) return null;
+  const [planRow] = (await db.readPlans([sub.planId])).filter((p) => p.id === sub.planId);
+  const cap = (planRow?.limits as { aiMonthlyCapUsd?: number | null } | undefined)?.aiMonthlyCapUsd;
+  return typeof cap === "number" ? cap : null;
+}
+
+const numOrNull = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+
+/** The workspace's applicable AI budget and where each part comes from. */
+export async function aiCapParts(db: ScopedDb) {
+  const [saved, planCap] = await Promise.all([db.findFirst(workspaceSettings), planAiCap(db)]);
+  const parts = {
+    adminCap: numOrNull(saved?.adminAiMonthlyCapUsd),
+    ownerCap: numOrNull(saved?.aiMonthlyCapUsd),
+    planCap,
+    defaultCap: getAiMonthlyCapUsd(),
+  };
+  return { ...parts, effective: resolveAiCap(parts) };
+}
+
+export async function effectiveAiCap(db: ScopedDb): Promise<number> {
+  return (await aiCapParts(db)).effective;
 }
 
 /** "YYYY-MM" in UTC, the usage_monthly.month key. */
@@ -70,13 +117,9 @@ export async function getAiBudget(
   db: ScopedDb,
   options: BudgetOptions = {},
 ): Promise<BudgetStatus> {
-  // Explicit option, then the workspace's saved cap (Settings), then AI_MONTHLY_CAP_USD.
-  const saved = options.capUsd === undefined ? await db.findFirst(workspaceSettings) : undefined;
-  const capUsd =
-    options.capUsd ??
-    (saved?.aiMonthlyCapUsd === null || saved?.aiMonthlyCapUsd === undefined
-      ? getAiMonthlyCapUsd()
-      : Number(saved.aiMonthlyCapUsd));
+  // Explicit option, else resolveAiCap (admin value, owner value capped at
+  // the plan's budget, plan budget, AI_MONTHLY_CAP_USD).
+  const capUsd = options.capUsd ?? (await effectiveAiCap(db));
   const usage = await getMonthlyUsage(db, (options.now ?? (() => new Date()))());
   const remainingUsd = Math.max(0, capUsd - usage.aiCostUsd);
   return { ...usage, capUsd, remainingUsd, exceeded: usage.aiCostUsd >= capUsd };

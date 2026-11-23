@@ -537,6 +537,10 @@ export const campaignSpecSchema = z.object({
   pixelId: z.string().optional(),
   optimizationEvent: z.string().optional(),
   landingPageUrl: z.url(),
+  /** Days a total budget runs (default TOTAL_BUDGET_DAYS in tiktok-ads/spec). */
+  totalDays: z.number().int().min(1).max(90).optional(),
+  /** Saved preset the spec was built from (none = built-in settings). */
+  presetId: z.string().optional(),
   adGroups: z
     .array(
       z.object({
@@ -546,6 +550,21 @@ export const campaignSpecSchema = z.object({
         gender: z.enum(["all", "male", "female"]).default("all"),
         bidStrategy: z.enum(["lowest_cost", "cost_cap"]),
         bidAmount: z.number().positive().optional(),
+        /** Default "smooth" (PACING_MODE_SMOOTH). */
+        pacing: z.enum(["smooth", "fast"]).optional(),
+        /** TikTok dayparting: 336 chars of 0/1, half hours from Monday 00:00. */
+        dayparting: z
+          .string()
+          .regex(/^[01]{336}$/)
+          .optional(),
+        /** ISO 639-1 codes; empty or absent = all languages. */
+        languages: z.array(z.string().regex(/^[a-z]{2}$/)).optional(),
+        operatingSystems: z.array(z.enum(["ANDROID", "IOS"])).optional(),
+        /** TikTok search results placement (default off). */
+        searchResults: z.boolean().optional(),
+        commentsDisabled: z.boolean().optional(),
+        videoDownloadDisabled: z.boolean().optional(),
+        shareDisabled: z.boolean().optional(),
         ads: z
           .array(
             z.object({

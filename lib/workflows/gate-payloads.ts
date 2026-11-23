@@ -165,6 +165,8 @@ export const videosPartPayloadSchema = z
      * units (Trendcart fetches no FX rates). Null when they are equal.
      */
     fxRate: z.number().positive().finite().nullable().optional(),
+    /** "Brand new campaign" preset chosen (null/absent = built-in settings). */
+    presetId: z.string().min(1).nullable().optional(),
   })
   .passthrough();
 export type VideosPartPayload = z.infer<typeof videosPartPayloadSchema>;

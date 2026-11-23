@@ -1,5 +1,5 @@
 /**
- * Better Auth tables (core + organization + two-factor plugins).
+ * Better Auth tables (core + organization + two-factor + admin plugins).
  *
  * Generated from Better Auth 1.7.12's own Drizzle generator, then kept by
  * hand. The export names (user, session, account, verification,
@@ -28,6 +28,11 @@ export const user = pgTable("user", {
     .$onUpdate(() => new Date())
     .notNull(),
   twoFactorEnabled: boolean("two_factor_enabled").default(false),
+  /** Admin plugin: "admin" for Trendcart platform admins (created by `pnpm admin:create`), else "user". */
+  role: text("role"),
+  banned: boolean("banned").default(false),
+  banReason: text("ban_reason"),
+  banExpires: timestamp("ban_expires"),
 });
 
 export const session = pgTable(
@@ -47,6 +52,8 @@ export const session = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     /** The session's current workspace. */
     activeOrganizationId: text("active_organization_id"),
+    /** Admin plugin: the admin user id when this session impersonates the user. */
+    impersonatedBy: text("impersonated_by"),
   },
   (t) => [index("session_userId_idx").on(t.userId)],
 );

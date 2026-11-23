@@ -7,12 +7,29 @@ import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { landing } from "@/content/landing";
-import type { BillingPeriod, PricingPlan } from "@/content/types";
+import type { BillingPeriod } from "@/content/types";
 import { useReducedMotion } from "@/lib/use-reduced-motion";
 import { cn } from "@/lib/utils";
 
 const { pricing } = landing;
 const { billing } = pricing;
+
+/** A plan as shown on the landing page (built from the admin's published plans). */
+export type DisplayPlan = {
+  id: string;
+  name: string;
+  description: string;
+  /** Null for a free trial plan. */
+  price: { monthly: number; yearly: number } | null;
+  trialDays: number;
+  /** Free trial included in a paid plan (Stripe), in days. */
+  paidTrialDays: number;
+  limits: { id: string; label: string; value: string }[];
+  features: string[];
+  cta: { label: string; href: string };
+  highlighted: boolean;
+  badge?: string;
+};
 
 /** Fixed locale so server and client render identical strings (no hydration mismatch). */
 const amountFormat = new Intl.NumberFormat("en-US", {
@@ -25,10 +42,8 @@ function formatAmount(value: number) {
 }
 
 /** Effective per-month amount for the selected period. */
-function perMonth(plan: PricingPlan, period: BillingPeriod) {
-  return period === "monthly"
-    ? plan.price.monthly
-    : Math.round((plan.price.yearly / 12) * 100) / 100;
+function perMonth(price: NonNullable<DisplayPlan["price"]>, period: BillingPeriod) {
+  return period === "monthly" ? price.monthly : Math.round((price.yearly / 12) * 100) / 100;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -38,9 +53,11 @@ function perMonth(plan: PricingPlan, period: BillingPeriod) {
 function BillingToggle({
   value,
   onChange,
+  yearlyBadge,
 }: {
   value: BillingPeriod;
   onChange: (value: BillingPeriod) => void;
+  yearlyBadge: string | null;
 }) {
   const name = useId();
   const options = [
@@ -74,9 +91,9 @@ function BillingToggle({
                 className="sr-only"
               />
               {option.label}
-              {option.value === "yearly" ? (
+              {option.value === "yearly" && yearlyBadge ? (
                 <span className="rounded-full border border-brand-border bg-brand-soft px-2 py-px text-[11px] leading-4 font-semibold text-brand-text">
-                  {billing.yearlyBadge}
+                  {yearlyBadge}
                 </span>
               ) : null}
             </label>
@@ -91,9 +108,17 @@ function BillingToggle({
 /*  Price                                                                      */
 /* -------------------------------------------------------------------------- */
 
-function Price({ plan, period }: { plan: PricingPlan; period: BillingPeriod }) {
+function Price({ plan, period }: { plan: DisplayPlan; period: BillingPeriod }) {
   const reduce = useReducedMotion();
-  const amount = formatAmount(perMonth(plan, period));
+  if (!plan.price) {
+    return (
+      <div>
+        <p className="text-4xl font-semibold tracking-tight md:text-5xl">Free</p>
+        <p className="mt-1 h-5 text-xs text-muted-foreground">for {plan.trialDays} days</p>
+      </div>
+    );
+  }
+  const amount = formatAmount(perMonth(plan.price, period));
   const yearlyTotal = formatAmount(plan.price.yearly);
   const srText =
     period === "monthly"
@@ -133,7 +158,7 @@ function Price({ plan, period }: { plan: PricingPlan; period: BillingPeriod }) {
 /*  Plan card                                                                  */
 /* -------------------------------------------------------------------------- */
 
-function PlanCard({ plan, period }: { plan: PricingPlan; period: BillingPeriod }) {
+function PlanCard({ plan, period }: { plan: DisplayPlan; period: BillingPeriod }) {
   const titleId = `plan-${plan.id}-title`;
 
   return (
@@ -160,6 +185,11 @@ function PlanCard({ plan, period }: { plan: PricingPlan; period: BillingPeriod }
 
       <div className="mt-6">
         <Price plan={plan} period={period} />
+        {plan.paidTrialDays > 0 ? (
+          <p className="mt-1 text-xs font-medium text-brand-text">
+            {plan.paidTrialDays}-day free trial
+          </p>
+        ) : null}
       </div>
 
       <Button
@@ -168,9 +198,7 @@ function PlanCard({ plan, period }: { plan: PricingPlan; period: BillingPeriod }
         variant={plan.highlighted ? "default" : "outline"}
         className="mt-6 w-full"
       >
-        <Link href={plan.cta.href} aria-label={plan.cta.ariaLabel}>
-          {plan.cta.label}
-        </Link>
+        <Link href={plan.cta.href}>{plan.cta.label}</Link>
       </Button>
 
       <dl className="mt-8 divide-y rounded-xl border bg-surface-2/40 text-sm">
@@ -198,14 +226,28 @@ function PlanCard({ plan, period }: { plan: PricingPlan; period: BillingPeriod }
 /*  Plans                                                                      */
 /* -------------------------------------------------------------------------- */
 
-export function PricingPlans() {
+export function PricingPlans({
+  plans,
+  yearlyBadge,
+}: {
+  plans: DisplayPlan[];
+  yearlyBadge: string | null;
+}) {
   const [period, setPeriod] = useState<BillingPeriod>("monthly");
+  const hasPaid = plans.some((p) => p.price);
 
   return (
     <div className="mt-10 md:mt-12">
-      <BillingToggle value={period} onChange={setPeriod} />
-      <ul className="mx-auto mt-10 grid max-w-lg grid-cols-1 gap-5 lg:max-w-none lg:grid-cols-3 lg:items-stretch">
-        {pricing.plans.map((plan) => (
+      {hasPaid ? (
+        <BillingToggle value={period} onChange={setPeriod} yearlyBadge={yearlyBadge} />
+      ) : null}
+      <ul
+        className={cn(
+          "mx-auto mt-10 grid max-w-lg grid-cols-1 gap-5 lg:max-w-none lg:items-stretch",
+          plans.length >= 3 ? "lg:grid-cols-3" : plans.length === 2 ? "lg:grid-cols-2" : "",
+        )}
+      >
+        {plans.map((plan) => (
           <li key={plan.id} className="min-w-0">
             <PlanCard plan={plan} period={period} />
           </li>

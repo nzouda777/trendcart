@@ -90,6 +90,8 @@ export type VideoReviewProps = {
   canPublish: boolean;
   approverLabel: string;
   adAccounts: TikTokAdAccountOptionDTO[];
+  /** The brand's saved "brand new campaign" setups (Brands > Campaign settings). */
+  campaignPresets?: { id: string; name: string; isDefault: boolean }[];
   /** TikTok Ads account chosen with the videos part, once approved. */
   chosenAdConnectionId: string | null;
   profiles: TikTokProfileOptionDTO[];
@@ -102,6 +104,7 @@ export type VideoReviewProps = {
   onApproveVideos: (input: {
     adConnectionId?: string;
     fxRate?: number;
+    presetId?: string;
     note?: string;
   }) => Promise<ActionResult>;
   onPublish: (input: PublishRequest) => Promise<ActionResult>;
@@ -457,8 +460,11 @@ function VideosPartApproval({
   canChooseAdAccount,
   brandCurrency,
   adAccounts,
+  campaignPresets = [],
   onApproveVideos,
 }: VideoReviewProps) {
+  const [presetId, setPresetId] = useState(campaignPresets.find((p) => p.isDefault)?.id ?? "");
+  const preset = campaignPresets.find((p) => p.id === presetId) ?? null;
   const usable = adAccounts.filter((a) => a.usable);
   const unusable = adAccounts.filter((a) => !a.usable);
   const [accountId, setAccountId] = useState(usable.length === 1 ? usable[0]!.id : "");
@@ -536,6 +542,30 @@ function VideosPartApproval({
               })),
             ]}
           />
+          <SelectField
+            id="videos-campaign-preset"
+            label="Campaign setup"
+            value={presetId}
+            disabled={!canApprove}
+            onChange={(e) => setPresetId(e.currentTarget.value)}
+            className="max-w-md"
+            hint={
+              <>
+                Budget, targeting, placements and structure of the paused campaign.{" "}
+                <Link href="/app/brands" className="text-brand-text underline underline-offset-4">
+                  Manage setups
+                </Link>{" "}
+                in the brand settings.
+              </>
+            }
+            options={[
+              ...campaignPresets.map((p) => ({
+                value: p.id,
+                label: `${p.name}${p.isDefault ? " (default)" : ""}`,
+              })),
+              { value: "", label: "Built-in setup (brand default budget, 1 ad group)" },
+            ]}
+          />
           {needsFx && account ? (
             <TextField
               id="videos-fx-rate"
@@ -562,7 +592,8 @@ function VideosPartApproval({
             description={
               <>
                 {ready.length} video{ready.length === 1 ? "" : "s"} will be used on{" "}
-                <strong className="text-foreground">{account?.name}</strong>
+                <strong className="text-foreground">{account?.name}</strong> with the setup{" "}
+                <strong className="text-foreground">{preset?.name ?? "Built-in"}</strong>
                 {needsFx && rate !== null ? (
                   <>
                     {" "}
@@ -581,6 +612,7 @@ function VideosPartApproval({
               onApproveVideos({
                 adConnectionId: accountId,
                 ...(needsFx && rate !== null ? { fxRate: rate } : {}),
+                ...(presetId ? { presetId } : {}),
                 note: note.trim() || undefined,
               })
             }

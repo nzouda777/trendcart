@@ -6,14 +6,21 @@ import { notFound } from "next/navigation";
 
 import { PageHeader } from "@/components/app-shell";
 import { BrandForm } from "@/components/app/brand-form";
+import { PresetPanel } from "@/components/app/campaign-presets/preset-panel";
 import { DeleteBrandButton } from "@/components/app/delete-brand-button";
 import { PageSkeleton, Section } from "@/components/app/surface";
 import { isAccessError } from "@/lib/auth/errors";
 import { can } from "@/lib/auth/permissions";
-import { getBrand } from "@/lib/services";
+import { getBrand, listCampaignPresets } from "@/lib/services";
 
 import { getPageContext } from "../../_lib/page-context";
 import { deleteBrandAction, updateBrandAction } from "../actions";
+import {
+  createPresetAction,
+  deletePresetAction,
+  setDefaultPresetAction,
+  updatePresetAction,
+} from "../preset-actions";
 
 export const metadata: Metadata = { title: "Brand settings" };
 
@@ -68,6 +75,26 @@ async function BrandSettingsContent({ params }: { params: Promise<{ id: string }
           onSubmit={updateBrandAction.bind(null, brand.id)}
         />
       </Section>
+
+      {can(role, "campaign:read") ? (
+        <Section
+          id="campaign-presets"
+          title="Campaign settings"
+          description="Saved TikTok campaign settings for this brand. TikTok's defaults often widen delivery and spend: set exactly what you want once, then reuse it."
+        >
+          <PresetPanel
+            brandCurrency={brand.currency}
+            brandCountry={brand.country}
+            defaultTestBudget={brand.defaultTestBudget}
+            presets={await listCampaignPresets(ctx, { brandId: brand.id })}
+            canEdit={can(role, "campaign:update")}
+            onCreate={createPresetAction.bind(null, brand.id)}
+            onUpdate={updatePresetAction}
+            onDelete={deletePresetAction}
+            onSetDefault={setDefaultPresetAction}
+          />
+        </Section>
+      ) : null}
 
       {can(role, "brand:delete") ? (
         <Section

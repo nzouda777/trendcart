@@ -10,7 +10,9 @@ const eslintConfig = defineConfig([
   // The raw db client bypasses tenant scoping: only the foundation layers may import it.
   {
     files: ["**/*.{ts,tsx}"],
-    ignores: ["lib/db/**", "lib/auth/**", "lib/tenant/**", "lib/audit/**"],
+    // lib/platform: platform admin services (behind requireAdmin), the Stripe
+    // webhook and the public pricing loader, cross-workspace by design.
+    ignores: ["lib/db/**", "lib/auth/**", "lib/tenant/**", "lib/audit/**", "lib/platform/**"],
     rules: {
       "no-restricted-imports": [
         "error",

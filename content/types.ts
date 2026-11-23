@@ -230,35 +230,6 @@ export type SecurityContent = SectionIntro & {
 
 export type BillingPeriod = "monthly" | "yearly";
 
-export type PlanId = "starter" | "growth" | "scale";
-
-export type PlanLimit = {
-  id: "stores" | "seats" | "products";
-  /** e.g. "Brands / stores". */
-  label: string;
-  /** e.g. "3" or "Unlimited". */
-  value: string;
-};
-
-export type PricingPlan = {
-  id: PlanId;
-  name: string;
-  description: string;
-  price: {
-    /** Price per month when billed monthly, in `pricing.currency`. */
-    monthly: number;
-    /** Total price per year when billed yearly (10 × monthly = "2 months free"). */
-    yearly: number;
-  };
-  /** Brands/stores, team seats, products per month. */
-  limits: readonly PlanLimit[];
-  features: readonly string[];
-  cta: Cta;
-  highlighted: boolean;
-  /** e.g. "Most popular" on the highlighted plan. */
-  badge?: string;
-};
-
 export type PricingContent = SectionIntro & {
   currency: "USD";
   currencySymbol: string;
@@ -266,8 +237,6 @@ export type PricingContent = SectionIntro & {
     toggleLabel: string;
     monthlyLabel: string;
     yearlyLabel: string;
-    /** "2 months free". */
-    yearlyBadge: string;
     /** Suffix after the price, e.g. "/month". */
     perMonthSuffix: string;
     /** sr-only period text, e.g. "per month". */
@@ -275,13 +244,11 @@ export type PricingContent = SectionIntro & {
     /** Note under the price when yearly is selected, e.g. "billed yearly". */
     billedYearlyNote: string;
   };
-  plans: readonly [PricingPlan, PricingPlan, PricingPlan];
   enterprise: {
     title: string;
     description: string;
     cta: Cta;
   };
-  footnote?: string;
 };
 
 /* -------------------------------------------------------------------------- */

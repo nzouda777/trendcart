@@ -17,6 +17,12 @@ export async function runAction<T>(
     const ctx = await getWorkspaceContext();
     return { ok: true, data: await fn(ctx) };
   } catch (error) {
-    return toServiceFailure(error);
+    const failure = toServiceFailure(error);
+    if (failure.code === "integration") {
+      // Shown to the user as a result, so log it: otherwise it never reaches the runtime logs.
+      const cause = error instanceof Error ? error.cause : undefined;
+      console.error("[action] integration failure:", failure.error, cause ?? "");
+    }
+    return failure;
   }
 }

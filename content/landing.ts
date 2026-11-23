@@ -323,82 +323,18 @@ export const landing = {
       toggleLabel: "Billing period",
       monthlyLabel: "Monthly",
       yearlyLabel: "Yearly",
-      yearlyBadge: "2 months free",
       perMonthSuffix: "/month",
       perMonthSrLabel: "per month",
       billedYearlyNote: "billed yearly",
     },
-    // TODO: confirm pricing with client
-    plans: [
-      {
-        id: "starter",
-        name: "Starter",
-        description: "For solo operators testing their first products.",
-        price: { monthly: 29, yearly: 290 },
-        limits: [
-          { id: "stores", label: "Brands / stores", value: "1 brand, 1 store" },
-          { id: "seats", label: "Team seats", value: "1" },
-          { id: "products", label: "Products per month", value: "25" },
-        ],
-        features: [
-          "AI product identification",
-          "Supplier matching and margin calculator",
-          "Shopify draft pages from your template",
-          "Video compliance check",
-          "Paused campaign builder",
-          "4 approval checkpoints",
-        ],
-        cta: { label: "Start with Starter", href: siteConfig.links.signUp },
-        highlighted: false,
-      },
-      {
-        id: "growth",
-        name: "Growth",
-        description: "For operators running several stores with a small team.",
-        price: { monthly: 79, yearly: 790 },
-        limits: [
-          { id: "stores", label: "Brands / stores", value: "3 brands, 5 stores" },
-          { id: "seats", label: "Team seats", value: "5" },
-          { id: "products", label: "Products per month", value: "150" },
-        ],
-        features: [
-          "Everything in Starter",
-          "Multiple stores, TikTok profiles and ad accounts",
-          "TikTok posting to connected profiles",
-          "Team roles and permissions",
-          "Optional proxy per brand",
-        ],
-        cta: { label: "Start with Growth", href: siteConfig.links.signUp },
-        highlighted: true,
-        badge: "Most popular",
-      },
-      {
-        id: "scale",
-        name: "Scale",
-        description: "For teams managing many brands and ad accounts.",
-        price: { monthly: 199, yearly: 1990 },
-        limits: [
-          { id: "stores", label: "Brands / stores", value: "10 brands, 25 stores" },
-          { id: "seats", label: "Team seats", value: "15" },
-          { id: "products", label: "Products per month", value: "500" },
-        ],
-        features: [
-          "Everything in Growth",
-          "Adjustable activity pace per brand",
-          "Two-factor authentication required for the whole team",
-          "Priority support",
-        ],
-        cta: { label: "Start with Scale", href: siteConfig.links.signUp },
-        highlighted: false,
-      },
-    ],
+    // Plans, prices, limits and features are defined by platform admins
+    // (/admin/plans) and loaded from the database (lib/platform/public-pricing).
     enterprise: {
       title: "Enterprise / custom",
       description:
         "Need more brands, seats or products, or a custom setup? We’ll put together a plan for you.",
       cta: { label: "Talk to us", href: siteConfig.links.signUp },
     },
-    footnote: "Prices in USD. Yearly billing is 10× the monthly price: 2 months free.",
   },
 
   faq: {

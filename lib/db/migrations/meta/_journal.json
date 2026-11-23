@@ -50,6 +50,27 @@
       "when": 1793795348514,
       "tag": "0006_m3_ad_currency_campaign_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795407474988,
+      "tag": "0007_m4_campaign_presets",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795409994829,
+      "tag": "0008_m5_admin_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795412925617,
+      "tag": "0009_m5_admin_ai_cap",
+      "breakpoints": true
     }
   ]
 }

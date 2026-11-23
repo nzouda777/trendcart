@@ -17,13 +17,15 @@
  * without any call. A crash between the TikTok call and the row update
  * re-runs the creation with the same spec (same deterministic name).
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { writeAudit } from "@/lib/audit";
+import { campaignPresetSettingsSchema } from "@/lib/domain/campaign-presets";
 import { IntegrationError, pageCopySchema } from "@/lib/domain/contracts";
 import {
   brand,
   campaign,
+  campaignPreset,
   shopifyConnection,
   shopifyProduct,
   tiktokAdConnection,
@@ -102,7 +104,11 @@ export const prepareCampaignStep: StepDefinition = {
     // Already prepared: nothing to do.
     const existing = await ctx.db.findFirst(
       campaign,
-      and(eq(campaign.productId, row.id), eq(campaign.adConnectionId, connection.id)),
+      and(
+        eq(campaign.productId, row.id),
+        eq(campaign.adConnectionId, connection.id),
+        isNull(campaign.sourceCampaignId),
+      ),
     );
     if (existing?.tiktokIds && existing.status !== "creating" && existing.status !== "draft") {
       return {};
@@ -150,7 +156,19 @@ export const prepareCampaignStep: StepDefinition = {
     }
 
     // 3. The paused campaign.
+    // The preset recorded at GATE 3; deleted since → built-in settings.
+    const presetRow = choice.presetId
+      ? await ctx.db.findById(campaignPreset, choice.presetId)
+      : undefined;
+    const presetSettings = presetRow
+      ? campaignPresetSettingsSchema.safeParse(presetRow.settings)
+      : null;
+    const preset =
+      presetRow && presetSettings?.success
+        ? { id: presetRow.id, settings: presetSettings.data }
+        : undefined;
     const spec = buildCampaignSpec({
+      ...(preset ? { preset } : {}),
       productId: row.id,
       productName: row.name ?? row.analysis?.productName ?? null,
       brand: {
@@ -168,7 +186,7 @@ export const prepareCampaignStep: StepDefinition = {
       ? (
           await ctx.db.update(
             campaign,
-            { config: spec, status: "creating" },
+            { config: spec, status: "creating", presetId: preset?.id ?? null },
             eq(campaign.id, existing.id),
           )
         )[0]!
@@ -177,6 +195,7 @@ export const prepareCampaignStep: StepDefinition = {
           adConnectionId: connection.id,
           config: spec,
           status: "creating",
+          presetId: preset?.id ?? null,
         });
 
     const ids = await integrations.tiktokAds

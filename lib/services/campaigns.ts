@@ -40,6 +40,7 @@ import {
 } from "./campaign-read";
 import { resolveIntegrations, resolveNow, resolvePipeline, type ServiceDeps } from "./deps";
 import { ServiceError } from "./errors";
+import { assertAccess } from "./internal/entitlements";
 import { getTikTokAdsCredentials, markConnectionNeedsReauth } from "./internal/credentials";
 import { loadPipeline } from "./pipeline";
 import type { ProductPipelineDTO } from "./types";
@@ -185,6 +186,7 @@ export async function launchCampaign(
   deps: ServiceDeps = {},
 ): Promise<ProductPipelineDTO> {
   requirePermission(ctx, "gate:launch", "campaign:launch");
+  await assertAccess(ctx);
   const v = productInputSchema.parse(input);
   const integrations = resolveIntegrations(deps);
   const now = resolveNow(deps);
@@ -416,6 +418,7 @@ export async function resumeCampaign(
   deps: ServiceDeps = {},
 ): Promise<ProductPipelineDTO> {
   requirePermission(ctx, "campaign:launch");
+  await assertAccess(ctx);
   const v = productInputSchema.parse(input);
   const integrations = resolveIntegrations(deps);
   const now = resolveNow(deps);

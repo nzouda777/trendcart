@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq, inArray, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, type SQL } from "drizzle-orm";
 import { z } from "zod";
 
 import { writeAudit } from "@/lib/audit";
@@ -61,6 +61,7 @@ import type {
   TikTokPostDTO,
   VideoDTO,
 } from "./types";
+import { assertWithinLimit } from "./internal/entitlements";
 
 /* Schemas ------------------------------------------------------------------ */
 
@@ -270,6 +271,10 @@ async function importProduct(
   if (existing) return { product: await loadDetail(ctx, existing.id), created: false };
 
   // Only new imports count (they cost an AI analysis); re-imports are free.
+  const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+  await assertWithinLimit(ctx, "productsPerMonth", () =>
+    ctx.db.count(product, gte(product.createdAt, monthStart)),
+  );
   await enforceImportLimit(ctx.workspaceId, deps);
 
   const row = await ctx.db.insert(product, {

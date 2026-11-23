@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, desc, eq, gte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull } from "drizzle-orm";
 
 import {
   brand,
@@ -127,9 +127,14 @@ function toStatDTO(r: Row<typeof campaignStatsHourly>): CampaignStatDTO {
 
 /** The product's campaign (latest), or null. */
 export async function findProductCampaign(db: ScopedDb, productId: string) {
-  return db.findFirst(campaign, eq(campaign.productId, productId), {
-    orderBy: (t) => desc(t.createdAt),
-  });
+  // The GATE 4 campaign; duplicates (source_campaign_id set) are read separately.
+  return db.findFirst(
+    campaign,
+    and(eq(campaign.productId, productId), isNull(campaign.sourceCampaignId)),
+    {
+      orderBy: (t) => desc(t.createdAt),
+    },
+  );
 }
 
 /** The campaign status left by a failed launch whose re-pause failed too. */

@@ -29,6 +29,8 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
+import type { SubscriptionSource, SubscriptionStatus } from "../../domain/billing";
+import type { CampaignPresetKind, CampaignPresetSettings } from "../../domain/campaign-presets";
 import {
   gateSchema,
   productStatusSchema,
@@ -501,18 +503,24 @@ export const campaign = pgTable(
      * campaign starves past the batch size.
      */
     statsSyncedAt: tz("stats_synced_at"),
+    /** Set on a duplicate: the launched campaign it was copied from. Null = the GATE 4 campaign. */
+    sourceCampaignId: text("source_campaign_id"),
+    /** Saved preset the campaign was built from (null = built-in settings). Not a FK: presets can be deleted. */
+    presetId: text("preset_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("campaign_workspace_idx").on(t.workspaceId),
     index("campaign_product_idx").on(t.workspaceId, t.productId),
-    /** One campaign per (product, ad account): the prepare step's crash-safety net. */
-    uniqueIndex("campaign_product_ad_connection_uidx").on(
-      t.workspaceId,
-      t.productId,
-      t.adConnectionId,
-    ),
+    /**
+     * One GATE 4 campaign per (product, ad account): the prepare step's
+     * crash-safety net. Duplicates (source_campaign_id set) are not limited.
+     */
+    uniqueIndex("campaign_product_ad_connection_uidx")
+      .on(t.workspaceId, t.productId, t.adConnectionId)
+      .where(sql`${t.sourceCampaignId} is null`),
+    index("campaign_source_idx").on(t.workspaceId, t.sourceCampaignId),
     unique("campaign_workspace_id_uq").on(t.workspaceId, t.id),
     sameWorkspaceFk(
       "campaign_product_fk",
@@ -524,6 +532,44 @@ export const campaign = pgTable(
       { workspaceId: t.workspaceId, ref: t.adConnectionId },
       () => tiktokAdConnection,
       "restrict",
+    ),
+  ],
+);
+
+/** Saved campaign settings per brand: "brand new campaign" setups and "duplicate" settings. */
+export const campaignPreset = pgTable(
+  "campaign_preset",
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    brandId: text("brand_id").notNull(),
+    kind: text("kind").$type<CampaignPresetKind>().notNull(),
+    name: text("name").notNull(),
+    settings: jsonb("settings").$type<CampaignPresetSettings>().notNull(),
+    /** Preselected for its kind (at most one per brand and kind). */
+    isDefault: boolean("is_default").notNull().default(false),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("campaign_preset_workspace_idx").on(t.workspaceId),
+    uniqueIndex("campaign_preset_brand_kind_name_uidx").on(
+      t.workspaceId,
+      t.brandId,
+      t.kind,
+      t.name,
+    ),
+    uniqueIndex("campaign_preset_default_uidx")
+      .on(t.workspaceId, t.brandId, t.kind)
+      .where(sql`${t.isDefault}`),
+    check("campaign_preset_kind_check", sql`${t.kind} in ('new_test', 'duplicate')`),
+    unique("campaign_preset_workspace_id_uq").on(t.workspaceId, t.id),
+    sameWorkspaceFk(
+      "campaign_preset_brand_fk",
+      { workspaceId: t.workspaceId, ref: t.brandId },
+      () => brand,
     ),
   ],
 );
@@ -710,10 +756,62 @@ export const workspaceSettings = pgTable(
     /** One page copy generation. */
     copywritingTimeoutSec: integer("copywriting_timeout_sec"),
     updatedBy: text("updated_by"),
+    /**
+     * Monthly AI budget set by a platform admin: wins over the owner's value and
+     * the plan's (it may exceed the plan). Null: none.
+     */
+    adminAiMonthlyCapUsd: numeric("admin_ai_monthly_cap_usd", {
+      precision: 10,
+      scale: 2,
+      mode: "number",
+    }),
+    /** Set by a platform admin: the workspace cannot use the app until unsuspended. */
+    suspendedAt: tz("suspended_at"),
+    suspendedReason: text("suspended_reason"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [uniqueIndex("workspace_settings_workspace_uidx").on(t.workspaceId)],
+);
+
+/**
+ * The workspace's subscription (one row per workspace). Written by the Stripe
+ * webhook, the free-trial activation and platform admins; read by the app
+ * through the scoped data layer. `planId` points at the platform `plan` table.
+ */
+export const workspaceSubscription = pgTable(
+  "workspace_subscription",
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    planId: text("plan_id"),
+    source: text("source").$type<SubscriptionSource>().notNull(),
+    status: text("status").$type<SubscriptionStatus>().notNull(),
+    interval: text("interval").$type<"month" | "year">(),
+    stripeCustomerId: text("stripe_customer_id"),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    stripePriceId: text("stripe_price_id"),
+    /** What this subscriber pays (cents per interval): old prices stay for old subscribers. */
+    unitAmountCents: integer("unit_amount_cents"),
+    currentPeriodEnd: tz("current_period_end"),
+    trialEndsAt: tz("trial_ends_at"),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    canceledAt: tz("canceled_at"),
+    /** End of a free trial plan or of an admin grant (null = no end). */
+    endsAt: tz("ends_at"),
+    /** Set once the workspace used a free trial plan (one per workspace). */
+    trialUsedAt: tz("trial_used_at"),
+    /** Who subscribed (the user who went through Checkout or started the trial). */
+    subscribedBy: text("subscribed_by"),
+    adminNote: text("admin_note"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("workspace_subscription_workspace_uidx").on(t.workspaceId),
+    uniqueIndex("workspace_subscription_stripe_sub_uidx").on(t.stripeSubscriptionId),
+    index("workspace_subscription_customer_idx").on(t.stripeCustomerId),
+  ],
 );
 
 /**
@@ -732,12 +830,14 @@ export const businessTables = {
   video,
   shopifyProduct,
   campaign,
+  campaignPreset,
   campaignStatsHourly,
   tiktokPost,
   job,
   approval,
   auditLog,
   usageMonthly,
+  workspaceSubscription,
 };
 
 export const businessEnums = {

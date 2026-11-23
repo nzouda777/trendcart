@@ -9,6 +9,9 @@
  * - forces `workspace_id` on every insert (callers cannot pass it: the type
  *   omits it and any runtime value is overwritten) and strips it from updates.
  *
+ * The only reads outside the workspace are `readPlans` / `readPlatformSetting`:
+ * read-only, platform-wide configuration set by admins (no tenant data).
+ *
  * There is no raw query escape hatch. Composite FKs (lib/db/schema) also stop
  * a row from referencing a parent in another workspace.
  *
@@ -22,10 +25,10 @@
  *   const brandRow = await db.insert(brand, { name: "Acme", country: "FR", language: "fr" });
  *   await db.update(product, { name: "New" }, (p) => eq(p.id, id));
  */
-import { and, count as countFn, eq, type AnyColumn, type SQL } from "drizzle-orm";
+import { and, count as countFn, eq, inArray, or, type AnyColumn, type SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
 
-import { businessTables } from "@/lib/db/schema";
+import { businessTables, plan, platformSetting } from "@/lib/db/schema";
 import type { Database } from "@/lib/db/types";
 import { NotFoundError } from "@/lib/auth/errors";
 
@@ -82,6 +85,10 @@ export interface ScopedDb {
   delete<T extends ScopedTable>(table: T, where: Where<T>): Promise<Row<T>[]>;
   /** Runs `fn` in a transaction; the scoped handle stays bound to the same workspace. */
   transaction<R>(fn: (tx: ScopedDb) => Promise<R>): Promise<R>;
+  /** Read-only platform plans: the published ones, plus `ids` (e.g. the workspace's own, even archived). */
+  readPlans(ids?: string[]): Promise<(typeof plan.$inferSelect)[]>;
+  /** Read-only platform setting value (e.g. "billing"), or null. */
+  readPlatformSetting(key: string): Promise<Record<string, unknown> | null>;
 }
 
 const registered = new Set<PgTable>(Object.values(businessTables) as PgTable[]);
@@ -231,6 +238,19 @@ export function createScopedDb(db: Database, workspaceId: string): ScopedDb {
 
     async transaction(fn) {
       return d.transaction((tx: Database) => fn(createScopedDb(tx, workspaceId)));
+    },
+
+    async readPlans(ids = []) {
+      const published = eq(plan.status, "published");
+      return d
+        .select()
+        .from(plan)
+        .where(ids.length ? or(published, inArray(plan.id, ids)) : published);
+    },
+
+    async readPlatformSetting(key) {
+      const [row] = await d.select().from(platformSetting).where(eq(platformSetting.key, key));
+      return row?.value ?? null;
     },
   };
 

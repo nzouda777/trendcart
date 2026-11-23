@@ -8,32 +8,9 @@
  * Refuses to run in production.
  */
 import { existsSync } from "node:fs";
-import path from "node:path";
 
-import { assertPgliteAllowed, ensurePgliteDir, parsePgliteUrl } from "./pglite-url";
+import { openDatabase } from "./cli-db";
 import { DEMO_PASSWORD, SEED_WORKSPACES, seed } from "./seed";
-import type { Database } from "./types";
-
-async function openDatabase(url: string): Promise<{ db: Database; close: () => Promise<void> }> {
-  const dataDir = parsePgliteUrl(url);
-  if (dataDir) {
-    assertPgliteAllowed();
-    const { PGlite } = await import("@electric-sql/pglite");
-    const { drizzle } = await import("drizzle-orm/pglite");
-    const { migrate } = await import("drizzle-orm/pglite/migrator");
-    const { schema } = await import("./schema");
-    const client = new PGlite(ensurePgliteDir(dataDir));
-    const db = drizzle({ client, schema });
-    await migrate(db, { migrationsFolder: path.join(process.cwd(), "lib", "db", "migrations") });
-    return { db: db as unknown as Database, close: () => client.close() };
-  }
-
-  const { Pool } = await import("@neondatabase/serverless");
-  const { drizzle } = await import("drizzle-orm/neon-serverless");
-  const { schema } = await import("./schema");
-  const pool = new Pool({ connectionString: url });
-  return { db: drizzle({ client: pool, schema }) as unknown as Database, close: () => pool.end() };
-}
 
 async function main() {
   if (existsSync(".env.local")) process.loadEnvFile(".env.local");

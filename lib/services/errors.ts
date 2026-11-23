@@ -42,7 +42,13 @@ export type ServiceErrorReason =
    * launchCampaign failed and pausing it again failed too: part of the
    * campaign may be spending. Check TikTok Ads Manager, or use pauseCampaign.
    */
-  | "launch_failed_not_paused";
+  | "launch_failed_not_paused"
+  /** The workspace has no subscription giving access (billing applies once a plan is published). */
+  | "subscription_required"
+  /** A plan limit (brands, stores, seats, products per month) is reached. */
+  | "plan_limit"
+  /** A platform admin suspended the workspace. */
+  | "workspace_suspended";
 
 export class ServiceError extends Error {
   readonly code: ServiceErrorCode;

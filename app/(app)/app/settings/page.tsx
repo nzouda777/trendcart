@@ -51,7 +51,12 @@ async function SettingsContent() {
         )
       }
     >
-      <SettingsForm settings={settings} canEdit={canEdit} onSubmit={updateSettingsAction} />
+      <SettingsForm
+        settings={settings}
+        canEdit={canEdit}
+        onSubmit={updateSettingsAction}
+        aiCap={settings.aiCap}
+      />
     </Section>
   );
 }

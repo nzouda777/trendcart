@@ -5,6 +5,7 @@
  * - Organization plugin = workspaces; roles owner / media_buyer / creative /
  *   viewer from ./permissions. The creator becomes owner.
  * - Optional TOTP two-factor.
+ * - Admin plugin: platform admins (user.role "admin") for /admin.
  *
  * `createAuth(db)` is pure (tests pass a PGlite db); the app uses `getAuth()`,
  * which builds the instance on first use so builds need no env vars.
@@ -13,12 +14,14 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { nextCookies } from "better-auth/next-js";
-import { organization, twoFactor } from "better-auth/plugins";
-import { asc, eq } from "drizzle-orm";
+import { admin, organization, twoFactor } from "better-auth/plugins";
+import { and, asc, eq } from "drizzle-orm";
 
 import { writeAuditForWorkspace } from "@/lib/audit";
 import { siteConfig } from "@/config/site";
-import { authSchema, member } from "@/lib/db/schema";
+import { authSchema, invitation, member } from "@/lib/db/schema";
+import { loadEntitlement } from "@/lib/services/internal/entitlements";
+import { createScopedDb } from "@/lib/tenant/scoped-db";
 import type { Database } from "@/lib/db/types";
 
 import { invitationEmail, sendAuthEmail, verificationEmail } from "./mail";
@@ -86,6 +89,31 @@ function assertKnownRoles(raw: string | string[] | null | undefined) {
     .filter(Boolean);
   if (list.length === 0 || !list.every(isRole)) {
     throw new APIError("BAD_REQUEST", { message: `Role must be one of: ${ROLES.join(", ")}.` });
+  }
+}
+
+/** Plan limit on team seats: members plus pending invitations. */
+async function assertSeatAvailable(db: Database, workspaceId: string) {
+  const scoped = createScopedDb(db, workspaceId);
+  const entitlement = await loadEntitlement(scoped);
+  if (entitlement.suspended || !entitlement.access) {
+    throw new APIError("FORBIDDEN", {
+      message: "This workspace has no active subscription. Choose a plan in Billing first.",
+    });
+  }
+  const limit = entitlement.limits.seats;
+  if (limit === null) return;
+  const [members, pending] = await Promise.all([
+    db.select({ id: member.id }).from(member).where(eq(member.organizationId, workspaceId)),
+    db
+      .select({ id: invitation.id })
+      .from(invitation)
+      .where(and(eq(invitation.organizationId, workspaceId), eq(invitation.status, "pending"))),
+  ]);
+  if (members.length + pending.length >= limit) {
+    throw new APIError("FORBIDDEN", {
+      message: `Your plan allows ${limit} team seat${limit === 1 ? "" : "s"} (members and pending invitations). Upgrade in Billing to invite more people.`,
+    });
   }
 }
 
@@ -191,6 +219,7 @@ export function createAuth(db: Database) {
           // Better Auth accepts any role string; only ours are valid.
           async beforeCreateInvitation({ invitation }) {
             assertKnownRoles(invitation.role);
+            await assertSeatAvailable(db, invitation.organizationId);
           },
           async beforeAddMember({ member: added }) {
             assertKnownRoles(added.role);
@@ -238,6 +267,14 @@ export function createAuth(db: Database) {
         },
       }),
       twoFactor({ issuer: siteConfig.name }),
+      // Platform admins (user.role "admin", created by `pnpm admin:create`):
+      // bans, session revocation, passwords, impersonation for /admin.
+      admin({
+        defaultRole: "user",
+        adminRoles: ["admin"],
+        impersonationSessionDuration: 60 * 60,
+        bannedUserMessage: "This account is suspended. Contact Trendcart support.",
+      }),
       // Must stay last: lets server actions set auth cookies.
       nextCookies(),
     ],

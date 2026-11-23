@@ -77,6 +77,22 @@ Si vous les renseignez, l'URL de redirection est `https://usetrendcart.com/api/t
 | `FIRECRAWL_API_KEY` | Extraction des pages produit fournisseurs |
 | `AI_MODE` | Laisser vide (même valeur que `INTEGRATIONS_MODE`) ou `live`. Jamais `mock` en prod. |
 
+## 5 bis. Paiements Stripe et admin
+
+| Variable | Valeur |
+| --- | --- |
+| `STRIPE_SECRET_KEY` | Clé secrète Stripe (`sk_live_…` en production). Sans elle, impossible de publier un plan payant. |
+| `STRIPE_WEBHOOK_SECRET` | Secret de signature (`whsec_…`) de l'endpoint `https://usetrendcart.com/api/stripe/webhook`. |
+
+Dans Stripe :
+
+1. **Developers › Webhooks** : ajouter l'endpoint ci-dessus avec les événements listés dans `/admin/settings`.
+2. **Settings › Billing › Customer portal** : activer le portail (changement de carte, de plan, résiliation).
+
+Compte admin : `pnpm admin:create --email <email> --name "<nom>"` avec `DATABASE_URL` pointant sur la base de production. Le mot de passe est saisi dans le terminal (masqué). Mot de passe oublié : `pnpm admin:password --email <email>`.
+
+La facturation ne s'applique qu'une fois au moins un plan **publié** dans `/admin/plans`. Avant, tous les workspaces utilisent l'app librement.
+
 ## 6. Recommandées
 
 | Variable | Pourquoi |

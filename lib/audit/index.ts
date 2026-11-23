@@ -62,6 +62,12 @@ export const auditActionSchema = z.enum([
   "campaign.launch",
   "campaign.pause",
   "campaign.budget_change",
+  "campaign.duplicate",
+  "campaign.preset_change",
+  // Billing
+  "billing.checkout_started",
+  "billing.trial_started",
+  "billing.subscription_updated",
 ]);
 export type AuditAction = z.infer<typeof auditActionSchema>;
 

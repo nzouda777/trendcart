@@ -45,6 +45,27 @@ sender, or a Resend error, makes the sign-up or invite fail with an error rather
 dropping the email. In mock mode the links are printed to the server log instead. Password
 reset is not implemented yet.
 
+## Platform admin (`/admin`) and billing
+
+- **Admin accounts** are created from a terminal only: `pnpm admin:create --email <email> --name "<name>"`
+  (uses `DATABASE_URL`, password typed hidden). Reset a forgotten password with
+  `pnpm admin:password --email <email>`. Admins change their password and turn on 2FA in
+  `/admin/account`. Every admin action is written to `platform_audit_log` (Activity › Admin actions).
+- **Plans** (`/admin/plans`): USD, yearly = monthly × the multiplier in `/admin/settings` (default 10)
+  unless the plan sets its own. Saving a paid plan syncs its Stripe product and prices; a new amount
+  creates new prices and archives the old ones, so current subscribers keep their price.
+- **Billing applies once a plan is published.** Without a subscription giving access (Stripe
+  trialing / active / past_due, a running free trial, or an admin grant), app pages show the billing
+  wall; `/app/billing`, `/app/account/security` and `/app/guide` stay open. Suspended workspaces see a
+  suspension notice.
+- **Limits** (brands, Shopify stores, seats, products per month, AI budget) are read live from the
+  plan: editing a plan changes every subscriber at once. A workspace AI budget set by an admin
+  overrides the plan's.
+- **Stripe webhook** `/api/stripe/webhook`: signature checked on the raw body; each event id is
+  processed once (`stripe_event`); the subscription is re-read from Stripe before it is stored, so
+  out-of-order events are harmless. Failed events show in Activity › Stripe events and Stripe retries
+  them.
+
 ## Crons
 
 | Path                               | Schedule                     | What it does                                                                                                                       |
