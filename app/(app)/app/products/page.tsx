@@ -6,7 +6,7 @@ import { Suspense } from "react";
 import { EmptyState, PageHeader } from "@/components/app-shell";
 import { ProductStatusBadge } from "@/components/app/badges";
 import { selectClass } from "@/components/app/form-controls";
-import { formatDate, formatMoney, hostOf } from "@/components/app/format";
+import { formatDate, formatMoney, sourceLabel } from "@/components/app/format";
 import { GATE_META, STEP_LABELS } from "@/components/app/product-status";
 import { ProductThumb } from "@/components/app/product-thumb";
 import { ListSkeleton, PageSkeleton } from "@/components/app/surface";
@@ -243,7 +243,7 @@ async function ProductList({
                 <span className="grid min-w-0 flex-1 gap-1">
                   <span className="truncate font-medium">{p.name ?? "Unidentified product"}</span>
                   <span className="truncate text-xs text-muted-foreground">
-                    {p.sourceType === "tiktok_video" ? "TikTok" : hostOf(p.sourceUrl)}
+                    {sourceLabel(p.sourceType, p.sourceUrl, true)}
                     {b && brands.length > 1 ? ` · ${b.name}` : ""} · {formatDate(p.createdAt)}
                   </span>
                   {p.gate ? (

@@ -5,6 +5,8 @@
 import { findUnsafeClaims } from "@/lib/ai/copy-safety";
 import type { ShopifyDraftProductInput, SupplierListing } from "@/lib/domain/contracts";
 import { fullSizeImageUrl, isPageImage } from "@/lib/sourcing/images";
+import { UPLOADED_IMAGE_PREFIX } from "@/lib/integrations/shopify/image-upload";
+import { isPendingImageUrl } from "@/lib/media/images";
 
 /** Shopify allows 3 options; we keep the variant matrix small for a test product. */
 export const MAX_OPTIONS = 3;
@@ -121,13 +123,28 @@ export function pageImageUrls(input: {
     .sort((a, b) => b.matchScore - a.matchScore);
   const extra: string[] = [];
   for (const url of [
-    ...usable([input.referenceImageUrl]),
+    ...usable([galleryReference(input.referenceImageUrl)]),
     ...lenders.flatMap((o) => usable(o.images)),
   ]) {
     if (gallery.length + extra.length >= MIN_PAGE_IMAGES) break;
     if (!gallery.includes(url) && !extra.includes(url)) extra.push(url);
   }
   return draftImageUrls(gallery, extra);
+}
+
+/**
+ * The analysis' reference image, unless it is a photo a user uploaded: that
+ * one reaches the draft through its own staged upload (pending_image), and its
+ * signed URL dies once it is sent, so it is never given to productSet.
+ */
+function galleryReference(url: string | null | undefined): string | null {
+  if (!url || isPendingImageUrl(url)) return null;
+  try {
+    const last = new URL(url).pathname.split("/").pop() ?? "";
+    return last.startsWith(UPLOADED_IMAGE_PREFIX) ? null : url;
+  } catch {
+    return null;
+  }
 }
 
 /** Public https image URLs, deduplicated, at most MAX_IMAGES. */

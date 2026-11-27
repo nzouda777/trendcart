@@ -388,6 +388,11 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
   return {
     mode: "mock",
 
+    verifyLaunchQuery(query) {
+      if (!isValidShopDomain(query.shop)) return false;
+      return verifyOAuthQuery(query, MOCK_SHOPIFY_API_SECRET);
+    },
+
     buildInstallUrl({ shopDomain, oauth, app }) {
       const shop = shopDomainSchema.parse(shopDomain);
       // Skip Shopify: hand back the callback URL Shopify would redirect to.
@@ -579,6 +584,22 @@ export function createMockShopifyClient(options: MockShopifyOptions = {}): Shopi
         fileUrl: `https://cdn.shopify.com/videos/c/o/v/${key.slice(0, 32)}.mp4`,
         status: "READY",
       });
+    },
+
+    async attachImage(creds, input) {
+      assertCreds(creds);
+      if (!/^gid:\/\/shopify\/Product\/\d+$/.test(input.productId)) {
+        throw shopifyError("not_found", "Mock Shopify: unknown product.");
+      }
+      if (input.data.byteLength === 0) {
+        throw shopifyError("invalid_input", "Mock Shopify: empty image.", { retryable: false });
+      }
+      // Same idempotency as live: one media per (product, image hash).
+      const key = digest(creds.shopDomain, input.productId, `image:${input.idempotencyKey}`);
+      return {
+        mediaId: `gid://shopify/MediaImage/${numericId(key)}`,
+        url: `https://cdn.shopify.com/s/files/1/mock/files/tcu-${key.slice(0, 16)}.jpg`,
+      };
     },
 
     async deleteProductMedia(creds, input) {

@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { can } from "@/lib/auth/permissions";
 
 import { getPageContext } from "../_lib/page-context";
-import { importAction } from "./actions";
+import { importAction, importImageAction } from "./actions";
 
 export const metadata: Metadata = { title: "Import" };
 
@@ -66,13 +66,14 @@ async function ImportContent() {
     <div className="grid max-w-2xl gap-6">
       <PageHeader
         title="Import a product"
-        description="Start from a TikTok video or a product page. Trendcart identifies the product, then waits for you to confirm it."
+        description="Start from a TikTok video, a product page or a product photo. Trendcart identifies the product, then waits for you to confirm it."
       />
-      <Section id="import" title="Paste a link">
+      <Section id="import" title="Choose a source">
         <ImportForm
           brands={brands.map(({ id, name }) => ({ id, name }))}
           defaultBrandId={activeBrand.id}
           onImport={importAction}
+          onImportImage={importImageAction}
         />
       </Section>
     </div>

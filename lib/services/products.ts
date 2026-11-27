@@ -62,6 +62,8 @@ import type {
   VideoDTO,
 } from "./types";
 import { assertWithinLimit } from "./internal/entitlements";
+import { storeSearchImage, validateImage } from "./product-images";
+import { uploadSourceUrl } from "@/lib/media/images";
 
 /* Schemas ------------------------------------------------------------------ */
 
@@ -161,6 +163,13 @@ export function toPostDTO(r: Row<typeof tiktokPost>, profileName: string | null)
     profileName,
     status: r.status,
     error: r.error,
+    profileUrl: r.creatorUsername
+      ? `https://www.tiktok.com/@${encodeURIComponent(r.creatorUsername)}`
+      : null,
+    postUrl:
+      r.creatorUsername && r.postId
+        ? `https://www.tiktok.com/@${encodeURIComponent(r.creatorUsername)}/video/${encodeURIComponent(r.postId)}`
+        : null,
     createdAt: iso(r.createdAt),
     updatedAt: iso(r.updatedAt),
   };
@@ -258,8 +267,14 @@ export async function loadDetail(
 
 async function importProduct(
   ctx: WorkspaceContext,
-  input: { sourceType: "tiktok_video" | "product_link"; sourceUrl: string; brandId: string },
+  input: {
+    sourceType: "tiktok_video" | "product_link" | "image";
+    sourceUrl: string;
+    brandId: string;
+  },
   deps: ServiceDeps,
+  /** Runs after the product row exists, before the analysis starts (e.g. store its photo). */
+  onCreated?: (productId: string) => Promise<void>,
 ): Promise<ImportResultDTO> {
   requirePermission(ctx, "product:create");
   await ctx.db.getById(brand, input.brandId);
@@ -284,6 +299,7 @@ async function importProduct(
     status: "imported",
     createdByUserId: ctx.actor.userId,
   });
+  if (onCreated) await onCreated(row.id);
 
   // M1: the analyze step runs inline; with the durable engine this only starts the run.
   await resolvePipeline(deps).start(ctx, row.id);
@@ -331,6 +347,51 @@ export async function importFromProductLink(
     ctx,
     { sourceType: "product_link", sourceUrl: link.url, brandId: v.brandId },
     deps,
+  );
+}
+
+const imageImportSchema = z.union([
+  z.object({ brandId: idSchema, imageUrl: z.string().trim().min(1).max(2048) }),
+  z.object({ brandId: idSchema, image: z.instanceof(Uint8Array) }),
+]);
+
+/**
+ * Image search: imports a product from a photo (uploaded, or a direct image
+ * link). The AI identifies the product from the photo, and sourcing runs a
+ * reverse image search on it. An uploaded photo waits in `pending_image`
+ * (signed URL for the outside services) until it is sent to the Shopify page
+ * with the other product photos, then it is deleted. Re-uploading the same
+ * file opens the existing product.
+ */
+export async function importFromImage(
+  ctx: WorkspaceContext,
+  input: z.input<typeof imageImportSchema>,
+  deps: ServiceDeps = {},
+): Promise<ImportResultDTO> {
+  requirePermission(ctx, "product:create");
+  const v = imageImportSchema.parse(input);
+  if ("imageUrl" in v) {
+    const link = parseLink(v.imageUrl);
+    if (link.sourceType !== "product_link") {
+      throw new ServiceError(
+        "invalid_input",
+        "This is a TikTok link: import it as a TikTok video instead.",
+      );
+    }
+    return importProduct(
+      ctx,
+      { sourceType: "image", sourceUrl: link.url, brandId: v.brandId },
+      deps,
+    );
+  }
+  const image = validateImage(v.image);
+  return importProduct(
+    ctx,
+    { sourceType: "image", sourceUrl: uploadSourceUrl(image.sha256), brandId: v.brandId },
+    deps,
+    async (productId) => {
+      await storeSearchImage(ctx, productId, image);
+    },
   );
 }
 

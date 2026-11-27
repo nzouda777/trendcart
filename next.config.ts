@@ -56,6 +56,11 @@ const nextConfig: NextConfig = {
   // node_modules at runtime instead of bundling its WASM. Production code
   // never references it (see lib/db/client.ts).
   serverExternalPackages: ["@electric-sql/pglite"],
+  // Image uploads (image search, product photos) go through server actions:
+  // 4 MB per image (lib/media/images), under Vercel's 4.5 MB request cap.
+  experimental: {
+    serverActions: { bodySizeLimit: "4.4mb" },
+  },
   turbopack: {
     rules: {
       "*.css": {

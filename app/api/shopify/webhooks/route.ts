@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 
 import { getIntegrationsMode } from "@/lib/integrations";
 import { createShopifyClient } from "@/lib/integrations/shopify";
+import { dropPendingInstall } from "@/lib/integrations/shopify/app-store-install";
 import { handleShopifyWebhook } from "@/lib/integrations/shopify/webhooks";
 import { findShopifyConnectionsByShopDomain, getSystemContext } from "@/lib/tenant/system";
 
@@ -28,6 +29,7 @@ export async function POST(request: NextRequest) {
       lookup: {
         findConnectionsByShop: (shop) => findShopifyConnectionsByShopDomain(shop),
         systemContext: (workspaceId) => getSystemContext(workspaceId, "webhook:shopify"),
+        dropPendingInstall: (shop) => dropPendingInstall(shop),
       },
     },
   );

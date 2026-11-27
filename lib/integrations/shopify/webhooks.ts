@@ -98,6 +98,8 @@ export type ShopifyWebhookLookup = {
   findConnectionsByShop(shopDomain: string): Promise<ShopConnectionRef[]>;
   /** createSystemContext(db, { workspaceId, name: "webhook:shopify" }). */
   systemContext(workspaceId: string): WorkspaceContext;
+  /** Drops a token parked by a Shopify-started install not claimed yet (./app-store-install). */
+  dropPendingInstall?(shopDomain: string): Promise<void>;
 };
 
 export type ShopifyWebhookDeps = {
@@ -207,7 +209,9 @@ async function dispatch(
           // Not wired: let Shopify retry rather than drop the event.
           return { status: 503, body: "webhook store unavailable" };
         }
-        // Signed by the public app: only public-mode connections are affected.
+        // Signed by the public app: only public-mode connections are affected,
+        // plus a store installed from Shopify that no workspace claimed yet.
+        await deps.lookup.dropPendingInstall?.(shop);
         targets = [];
         for (const ref of await deps.lookup.findConnectionsByShop(shop)) {
           const ctx = deps.lookup.systemContext(ref.workspaceId);

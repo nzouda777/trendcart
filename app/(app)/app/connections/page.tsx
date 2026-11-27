@@ -10,6 +10,7 @@ import { DisconnectButton } from "@/components/app/connections/disconnect-button
 import { ProxyPanel } from "@/components/app/connections/proxy-panel";
 import {
   ShopifyCustomConnectForm,
+  ShopifyInstallLink,
   ShopifyPublicConnectForm,
 } from "@/components/app/connections/shopify-connect";
 import { TemplateForm } from "@/components/app/connections/template-form";
@@ -17,7 +18,7 @@ import { formatDateTime } from "@/components/app/format";
 import { ListSkeleton, PageSkeleton, Section } from "@/components/app/surface";
 import { Button } from "@/components/ui/button";
 import { can, type Role } from "@/lib/auth/permissions";
-import { listConnections } from "@/lib/services";
+import { getPendingShopifyClaim, listConnections } from "@/lib/services";
 import type { BrandDTO, ConnectionHealth } from "@/lib/services/types";
 
 import { getPageContext } from "../_lib/page-context";
@@ -33,6 +34,31 @@ import {
 
 export const metadata: Metadata = { title: "Connections" };
 
+/**
+ * The public app's install page (App Store listing or Shopify install link).
+ * Set once the app is distributed; until then (development, review) the
+ * store-domain form starts the install from Trendcart.
+ */
+/**
+ * Shopify blocks standalone (non-embedded) public apps, so stores connect
+ * with their own app (custom app mode) by default. The shared public app is
+ * offered only when it is configured (SHOPIFY_API_KEY).
+ */
+function shopifyPublicAppEnabled(): boolean {
+  return Boolean(process.env.SHOPIFY_API_KEY?.trim());
+}
+
+function shopifyInstallUrl(): string | null {
+  const raw = process.env.SHOPIFY_APP_INSTALL_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
 // Session reads stay behind Suspense so the route keeps a static shell.
@@ -45,16 +71,32 @@ export default function ConnectionsPage(props: { searchParams: SearchParams }) {
 }
 
 async function ConnectionsContent({ searchParams }: { searchParams: SearchParams }) {
-  const [params, { role, activeBrand, brands }] = await Promise.all([
+  const [params, { ctx, role, activeBrand, brands }] = await Promise.all([
     searchParams,
     getPageContext(),
   ]);
+  const claimShop = await getPendingShopifyClaim(ctx);
+  const claimBanner = claimShop ? (
+    <div
+      role="status"
+      className="flex flex-col gap-3 rounded-xl border border-brand-border bg-brand-soft p-4 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <p className="text-sm">
+        <span className="font-medium">{claimShop}</span> installed Trendcart and is waiting to be
+        connected to a brand.
+      </p>
+      <Button asChild size="sm">
+        <Link href="/app/connections/shopify-claim">Connect it</Link>
+      </Button>
+    </div>
+  ) : null;
 
   if (!activeBrand) {
     return (
       <div className="grid gap-6">
         <PageHeader title="Connections" />
         <CallbackBanners params={params} />
+        {claimBanner}
         <EmptyState
           icon={Building2Icon}
           title="Add a brand first"
@@ -84,6 +126,7 @@ async function ConnectionsContent({ searchParams }: { searchParams: SearchParams
         }
       />
       <CallbackBanners params={params} />
+      {claimBanner}
       <Suspense fallback={<ListSkeleton rows={4} />}>
         <BrandConnections brand={activeBrand} role={role} />
       </Suspense>
@@ -256,15 +299,32 @@ async function BrandConnections({ brand, role }: { brand: BrandDTO; role: Role }
               <h3 className="text-sm font-medium">
                 {data.shopify.length > 0 ? "Connect another store" : "Connect a store"}
               </h3>
-              <ShopifyPublicConnectForm brandId={brand.id} />
-              <details className="rounded-lg border border-border">
-                <summary className="cursor-pointer rounded-lg px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  Use a custom app from the store&apos;s admin instead
-                </summary>
-                <div className="px-3 pb-3">
-                  <ShopifyCustomConnectForm brandId={brand.id} />
-                </div>
-              </details>
+              <p className="text-sm text-muted-foreground">
+                Create your own app for this store in the Shopify Dev Dashboard, then paste its
+                client ID and secret. Trendcart opens Shopify to approve the access.{" "}
+                <Link
+                  href="/app/guide#shopify-app"
+                  target="_blank"
+                  className="text-brand-text underline-offset-4 hover:underline"
+                >
+                  Step-by-step guide
+                </Link>
+              </p>
+              <ShopifyCustomConnectForm brandId={brand.id} submitLabel="Connect Shopify" />
+              {shopifyPublicAppEnabled() ? (
+                <details className="rounded-lg border border-border">
+                  <summary className="cursor-pointer rounded-lg px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    Use the Trendcart Shopify app instead
+                  </summary>
+                  <div className="px-3 pb-3">
+                    {shopifyInstallUrl() ? (
+                      <ShopifyInstallLink href={shopifyInstallUrl()!} />
+                    ) : (
+                      <ShopifyPublicConnectForm brandId={brand.id} />
+                    )}
+                  </div>
+                </details>
+              ) : null}
             </div>
           ) : (
             <ReadOnlyNote />

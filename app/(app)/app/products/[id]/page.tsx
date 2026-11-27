@@ -8,13 +8,15 @@ import { ZodError } from "zod";
 import { PageHeader } from "@/components/app-shell";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { Pill, ProductStatusBadge } from "@/components/app/badges";
+import { ProductPhotos } from "@/components/app/product/product-photos";
 import {
   formatDateTime,
   formatMoney,
   formatPercent,
   formatRelativeTime,
   formatUsd,
-  hostOf,
+  isUploadedSource,
+  sourceLabel,
 } from "@/components/app/format";
 import {
   ConfirmProductButton,
@@ -60,8 +62,10 @@ import {
   getProductPipeline,
   listCampaignDuplicates,
   listCampaignPresets,
+  listPendingImages,
   quoteSupplierChoice,
   toServiceFailure,
+  type PendingImageDTO,
 } from "@/lib/services";
 import type {
   CampaignDTO,
@@ -103,11 +107,13 @@ import {
   addVideoAction,
   approveVideoAction,
   approveVideosAction,
+  getTikTokPostingInfoAction,
   publishToProfileAction,
   recheckVideoAction,
   refreshTikTokPostsAction,
   rejectVideoAction,
 } from "./video-actions";
+import { deletePendingImageAction, uploadProductImagesAction } from "./image-actions";
 
 export const metadata: Metadata = { title: "Product" };
 
@@ -186,8 +192,12 @@ async function ProductDetail({ params, searchParams }: Props) {
   ]);
 
   let product: ProductPipelineDTO;
+  let pendingImages: PendingImageDTO[];
   try {
-    product = await getProductPipeline(ctx, id);
+    [product, pendingImages] = await Promise.all([
+      getProductPipeline(ctx, id),
+      listPendingImages(ctx, id),
+    ]);
   } catch (error) {
     if ((isAccessError(error) && error.code === "not_found") || error instanceof ZodError) {
       notFound();
@@ -243,16 +253,20 @@ async function ProductDetail({ params, searchParams }: Props) {
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>{brand?.name ?? "Unknown brand"}</span>
             <span aria-hidden="true">·</span>
-            <a
-              href={product.sourceUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-brand-text underline-offset-4 hover:underline"
-            >
-              {product.sourceType === "tiktok_video" ? "TikTok video" : hostOf(product.sourceUrl)}
-              <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
-              <span className="sr-only">(opens in a new tab)</span>
-            </a>
+            {isUploadedSource(product.sourceUrl) ? (
+              <span>{sourceLabel(product.sourceType, product.sourceUrl)}</span>
+            ) : (
+              <a
+                href={product.sourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-brand-text underline-offset-4 hover:underline"
+              >
+                {sourceLabel(product.sourceType, product.sourceUrl)}
+                <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
+                <span className="sr-only">(opens in a new tab)</span>
+              </a>
+            )}
             <span aria-hidden="true">·</span>
             <span>Imported {formatDateTime(product.createdAt)}</span>
           </span>
@@ -476,6 +490,22 @@ async function ProductDetail({ params, searchParams }: Props) {
           <PageSummary product={product} />
         </Section>
       ) : null}
+
+      <Section
+        id="photos"
+        title="Product photos"
+        description="Your own photos for the Shopify page, added next to the supplier photos."
+      >
+        <ProductPhotos
+          productId={product.id}
+          pending={pendingImages}
+          hasShopifyDraft={Boolean(product.shopify)}
+          shopDomain={product.shopify?.shopDomain ?? null}
+          canEdit={can(role, "product:update")}
+          onUpload={uploadProductImagesAction}
+          onDelete={deletePendingImageAction}
+        />
+      </Section>
 
       {product.status !== "awaiting_content_approval" &&
       (reached(product, "building_page_and_videos") || product.videos.length > 0) ? (
@@ -789,6 +819,7 @@ async function VideoLibrary({
       onRecheck={recheckVideoAction.bind(null, product.id)}
       onApproveVideos={approveVideosAction.bind(null, product.id)}
       onPublish={publishToProfileAction}
+      onLoadCreator={getTikTokPostingInfoAction}
     />
   );
 }
@@ -1190,7 +1221,7 @@ function SourcePreview({
     product.videos.find((v) => v.tiktokUrl === product.sourceUrl);
   // Stable URLs first; TikTok thumbnails are signed and expire (ProductThumb falls back).
   const image =
-    product.sourceType === "product_link"
+    product.sourceType !== "tiktok_video"
       ? (referenceImage ?? supplierImage ?? product.thumbnailUrl)
       : (video?.thumbnailUrl ?? product.thumbnailUrl ?? supplierImage ?? referenceImage);
   return (
@@ -1209,13 +1240,22 @@ function SourcePreview({
         items={[
           {
             label: "Type",
-            value: product.sourceType === "tiktok_video" ? "TikTok video" : "Product link",
+            value:
+              product.sourceType === "tiktok_video"
+                ? "TikTok video"
+                : product.sourceType === "image"
+                  ? "Image search"
+                  : "Product link",
           },
           ...(video?.author ? [{ label: "Creator", value: video.author }] : []),
-          {
-            label: "Link",
-            value: <span className="font-mono text-xs break-all">{product.sourceUrl}</span>,
-          },
+          ...(isUploadedSource(product.sourceUrl)
+            ? [{ label: "Photo", value: "Uploaded (kept until it is on the Shopify page)" }]
+            : [
+                {
+                  label: "Link",
+                  value: <span className="font-mono text-xs break-all">{product.sourceUrl}</span>,
+                },
+              ]),
         ]}
       />
     </div>

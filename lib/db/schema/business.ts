@@ -74,6 +74,11 @@ export const shopifyAppModeEnum = pgEnum("shopify_app_mode", ["public", "custom"
 export const productSourceTypeEnum = pgEnum("product_source_type", [
   "tiktok_video",
   "product_link",
+  "image", // image search: an uploaded photo or an image URL
+]);
+export const pendingImagePurposeEnum = pgEnum("pending_image_purpose", [
+  "search", // the photo an image-search product was imported from
+  "gallery", // a product photo uploaded by a user for the Shopify page
 ]);
 export const videoOriginEnum = pgEnum("video_origin", [
   "imported", // the TikTok link the product was imported from
@@ -610,6 +615,10 @@ export const tiktokPost = pgTable(
     profileConnectionId: text("profile_connection_id").notNull(),
     publishId: text("publish_id"),
     status: tiktokPostStatusEnum("status").notNull().default("pending"),
+    /** TikTok post id once published publicly (private posts get none). */
+    postId: text("post_id"),
+    /** Creator @username at posting time (creator_info), for the link to the post. */
+    creatorUsername: text("creator_username"),
     error: text("error"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -815,6 +824,50 @@ export const workspaceSubscription = pgTable(
 );
 
 /**
+ * Images uploaded by users, held only until they reach Shopify. The bytes live
+ * here (base64) because Trendcart has no file storage: once an image is on the
+ * Shopify product (staged upload), its row is deleted. Rows of products that
+ * never reach Shopify are purged after PENDING_IMAGE_TTL_DAYS by a cron, and
+ * cascade with their product.
+ */
+export const pendingImage = pgTable(
+  "pending_image",
+  {
+    id: id(),
+    workspaceId: workspaceId(),
+    productId: text("product_id").notNull(),
+    purpose: pendingImagePurposeEnum("purpose").notNull(),
+    mimeType: text("mime_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    /** sha256 hex of the bytes: dedupe per product and Shopify idempotency key. */
+    sha256: text("sha256").notNull(),
+    dataBase64: text("data_base64").notNull(),
+    position: integer("position").notNull().default(0),
+    createdByUserId: text("created_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("pending_image_workspace_idx").on(t.workspaceId),
+    index("pending_image_product_idx").on(t.workspaceId, t.productId),
+    index("pending_image_created_idx").on(t.createdAt),
+    uniqueIndex("pending_image_product_sha_uidx").on(
+      t.workspaceId,
+      t.productId,
+      t.purpose,
+      t.sha256,
+    ),
+    check("pending_image_size_check", sql`${t.byteSize} > 0`),
+    sameWorkspaceFk(
+      "pending_image_product_fk",
+      { workspaceId: t.workspaceId, ref: t.productId },
+      () => product,
+    ),
+  ],
+);
+
+/**
  * Every workspace-scoped table. lib/tenant/scoped-db only accepts these.
  * Add new business tables here, or they cannot be queried.
  */
@@ -838,6 +891,7 @@ export const businessTables = {
   auditLog,
   usageMonthly,
   workspaceSubscription,
+  pendingImage,
 };
 
 export const businessEnums = {
@@ -847,6 +901,7 @@ export const businessEnums = {
   connectionStatusEnum,
   shopifyAppModeEnum,
   productSourceTypeEnum,
+  pendingImagePurposeEnum,
   videoOriginEnum,
   videoApprovalEnum,
   shopifyProductStatusEnum,

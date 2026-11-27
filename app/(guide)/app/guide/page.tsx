@@ -407,20 +407,41 @@ export default function GuidePage() {
                 ]}
               />
               <div className="grid gap-6 lg:grid-cols-3">
-                <div className="grid content-start gap-2">
+                <div id="shopify-app" className="grid scroll-mt-24 content-start gap-2">
                   <SubHeading>Shopify store</SubHeading>
                   <Prose>
                     <p>
-                      Enter the store&apos;s <strong>your-store.myshopify.com</strong> address (not
-                      your custom domain), click <Ui>Connect Shopify</Ui> and approve Trendcart in
-                      Shopify.
+                      Each store connects through its own Shopify app, created once in the Shopify
+                      Dev Dashboard (about 5 minutes):
                     </p>
-                    <p>
-                      Prefer your own app? Open{" "}
-                      <strong>Use a custom app from the store&apos;s admin instead</strong> and
-                      paste its client ID and secret. The secret is stored encrypted and never shown
-                      again.
-                    </p>
+                    <ol className="grid list-decimal gap-1.5 pl-5">
+                      <li>
+                        In the Shopify admin, open <Ui>Settings</Ui>, <Ui>Apps</Ui>,{" "}
+                        <Ui>Develop apps</Ui> (click <Ui>Build apps in Dev Dashboard</Ui> if shown).
+                        Click <Ui>Create app</Ui>, <Ui>Start from Dev Dashboard</Ui>, name it
+                        Trendcart.
+                      </li>
+                      <li>
+                        <Ui>Versions</Ui>, <Ui>Create a version</Ui>: App URL{" "}
+                        <code>https://usetrendcart.com/app/connections</code>, redirect URL{" "}
+                        <code>https://usetrendcart.com/api/shopify/callback</code>, scopes{" "}
+                        <code>write_products</code>, <code>read_themes</code>,{" "}
+                        <code>write_files</code>, <code>write_publications</code>. Leave &quot;Embed
+                        app in Shopify admin&quot; off, then <Ui>Release</Ui>.
+                      </li>
+                      <li>
+                        In the app&apos;s <Ui>Settings</Ui>, copy the <strong>Client ID</strong> and
+                        the <strong>Client secret</strong>. Do not click Install in the Dev
+                        Dashboard.
+                      </li>
+                      <li>
+                        In Trendcart, <Ui>Connections</Ui>: enter the{" "}
+                        <strong>your-store.myshopify.com</strong> address (not your custom domain),
+                        paste the client ID and secret, click <Ui>Connect Shopify</Ui> and approve
+                        the access in Shopify.
+                      </li>
+                    </ol>
+                    <p>The secret is stored encrypted and never shown again.</p>
                     <p>
                       <strong>Product page template</strong>: the name of a product template in your
                       live theme (for example <code>trendcart</code> for{" "}
@@ -488,8 +509,16 @@ export default function GuidePage() {
                   <p>
                     TikTok&apos;s defaults often widen delivery and spend more than you planned.
                     Save exactly the settings you want once, per brand, and reuse them. Open{" "}
-                    <Ui>Brands</Ui>, pick a brand, then <Ui>Campaign settings</Ui>. Only a Media
+                    <Ui>Campaigns</Ui>, then the <Ui>Campaign settings</Ui> tab, and pick the brand
+                    (also available in <Ui>Brands</Ui>, on the brand&apos;s page). Only a Media
                     buyer or the Owner can change them.
+                  </p>
+                  <p>
+                    The <Ui>Campaigns</Ui> tab lists every campaign of the workspace, the test
+                    campaign of each product and its duplicates, with the last 72 hours of stats.
+                    Filter by status or brand, then pause, resume, change the daily budget or
+                    duplicate a launched campaign from there. A test campaign is still approved and
+                    launched from its product page (GATE 4).
                   </p>
                   <p>There are two lists, each with as many named settings as you need:</p>
                 </>

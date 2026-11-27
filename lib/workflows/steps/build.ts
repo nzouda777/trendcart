@@ -21,6 +21,8 @@
  *    When the page left a Trendcart-generated template for an existing one
  *    (GATE 3 template change), the orphaned product.tc-<id>.json is deleted
  *    from the theme, best effort, after the draft was switched.
+ * 2b. Photos users uploaded (pending_image) are sent to the draft (staged
+ *    uploads) and deleted from Trendcart (../pending-images).
  * 3. Videos (./videos.ts): gather related videos and run compliance checks
  *    (bounded fan-out), each idempotent on (product, tiktok_url).
  *
@@ -48,6 +50,7 @@ import { approval, brand, product, shopifyProduct, supplierMatch } from "@/lib/d
 import { draftProductInputFromPageCopy } from "@/lib/integrations/shopify";
 import { imageFilename } from "@/lib/integrations/shopify/product-input";
 import { getShopifyCredentialsFor } from "@/lib/services/internal/credentials";
+import { pushPendingImages } from "../pending-images";
 import type { WorkspaceContext } from "@/lib/tenant/context";
 import type { Row, ScopedDb } from "@/lib/tenant/scoped-db";
 
@@ -479,6 +482,12 @@ export const buildStep: StepDefinition = {
     }
 
     const synced = await syncShopifyDraft(ctx, integrations, current, { choice, supplier, copy });
+    // Photos users uploaded join the draft, then leave Trendcart (no file storage).
+    await pushPendingImages(ctx, integrations, {
+      productId: row.id,
+      connectionId: choice.shopifyConnectionId,
+      shopifyProductId: synced.ref.productId,
+    });
     if (
       current.pageTemplate?.mode !== "generate" &&
       (await leftGeneratedTemplate(ctx.db, row.id))

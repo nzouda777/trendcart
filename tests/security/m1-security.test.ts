@@ -290,6 +290,12 @@ describe("role checks on every exported service", () => {
       // Campaign presets and duplicates are campaign:read (viewers included).
       "listCampaignPresets",
       "listCampaignDuplicates",
+      "listWorkspaceCampaigns",
+      // Product photos waiting for Shopify are product:read.
+      "listPendingImages",
+      "readPendingImage",
+      // The store this browser installed from Shopify (connection:read).
+      "getPendingShopifyClaim",
     ]);
     // Usage is media buyer+ (cost data), so viewers are refused there too.
     for (const [name, fn] of fns.filter(([n]) => !reads.has(n))) {

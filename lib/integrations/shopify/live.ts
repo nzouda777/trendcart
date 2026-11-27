@@ -76,6 +76,8 @@ import {
 import {
   missingScopes,
   tokenFromResponse,
+  type AttachedImage,
+  type AttachImageInput,
   type AttachVideoInput,
   type ShopifyAdapter,
   type ShopifyInstallToken,
@@ -106,6 +108,18 @@ import {
   type VideoNode,
   type VideoNodeData,
 } from "./video";
+import {
+  bytesStream,
+  PRODUCT_ATTACH_IMAGE_MUTATION,
+  PRODUCT_IMAGES_QUERY,
+  STAGED_IMAGE_UPLOAD_MUTATION,
+  uploadedImageFilename,
+  uploadedImageMarker,
+  urlHasUploadedMarker,
+  type AttachImageData,
+  type ProductImagesData,
+} from "./image-upload";
+import { extensionForMime, MAX_IMAGE_BYTES } from "@/lib/media/images";
 
 /*
  * Live Shopify adapter (Admin GraphQL, pinned version from config.ts).
@@ -563,6 +577,12 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       return `https://${shop}/admin/oauth/authorize?${params.toString()}`;
     },
 
+    verifyLaunchQuery(query) {
+      const secret = config().apiSecret;
+      if (!secret || !isValidShopDomain(query.shop)) return false;
+      return verifyOAuthQuery(query, secret);
+    },
+
     async completeInstall({ query, expectedState, app }) {
       const creds = appCredentials(app);
       const shop = query.shop;
@@ -856,6 +876,8 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
 
     attachVideoFromUrl,
 
+    attachImage,
+
     async deleteProductMedia(creds, { productId, mediaIds }) {
       assertProductGid(productId);
       // Images (MediaImage) and videos (Video) alike: both are files.
@@ -1094,6 +1116,114 @@ export function createLiveShopifyClient(options: LiveShopifyOptions = {}): Shopi
       throw shopifyError("not_found", "Shopify product not found.", { retryable: false });
     }
     assertNoUserErrors("productUpdate media", errors);
+  }
+
+  /* ------------------------------ Image media ------------------------------ */
+
+  /** The uploaded image with this marker on the product, or null. not_found when the product is gone. */
+  async function findOwnImage(
+    creds: ShopifyCredentials,
+    productId: string,
+    marker: string,
+  ): Promise<AttachedImage | null> {
+    const data = await gql<ProductImagesData>(creds, PRODUCT_IMAGES_QUERY, { id: productId });
+    if (!data.product) {
+      throw shopifyError("not_found", "Shopify product not found.", { retryable: false });
+    }
+    const found = data.product.media.nodes.find(
+      (m) => m.mediaContentType === "IMAGE" && urlHasUploadedMarker(m.image?.url, marker),
+    );
+    return found ? { mediaId: found.id, url: found.image?.url ?? null } : null;
+  }
+
+  /**
+   * Uploads image bytes a user gave us to a staged target and adds them to the
+   * product (see ./image-upload). Idempotent per `idempotencyKey` once Shopify
+   * has processed the image (its CDN URL carries the marker).
+   */
+  async function attachImage(
+    creds: ShopifyCredentials,
+    input: AttachImageInput,
+  ): Promise<AttachedImage> {
+    assertProductGid(input.productId);
+    const size = input.data.byteLength;
+    if (size === 0 || size > MAX_IMAGE_BYTES) {
+      throw shopifyError("invalid_input", "The image is empty or too large.", { retryable: false });
+    }
+    const marker = uploadedImageMarker(input.idempotencyKey);
+    const existing = await findOwnImage(creds, input.productId, marker);
+    if (existing) return existing;
+
+    const filename = uploadedImageFilename(marker, extensionForMime(input.mimeType));
+    const staged = await gql<StagedUploadsData>(creds, STAGED_IMAGE_UPLOAD_MUTATION, {
+      input: [
+        {
+          resource: "IMAGE",
+          filename,
+          mimeType: input.mimeType,
+          fileSize: String(size),
+          httpMethod: "POST",
+        },
+      ],
+    });
+    assertNoUserErrors("stagedUploadsCreate", staged.stagedUploadsCreate.userErrors);
+    const target = staged.stagedUploadsCreate.stagedTargets?.[0];
+    if (!target?.url || !target.resourceUrl || !target.url.startsWith("https://")) {
+      throw shopifyError("provider_error", "stagedUploadsCreate returned no usable target.");
+    }
+
+    const upload = multipartUpload({
+      parameters: target.parameters,
+      filename,
+      mimeType: input.mimeType,
+      size,
+      source: bytesStream(input.data),
+    });
+    let uploaded: Response;
+    try {
+      uploaded = await doFetch(target.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": upload.contentType,
+          "Content-Length": String(upload.contentLength),
+        },
+        body: upload.body,
+        duplex: "half",
+        signal: AbortSignal.timeout(60_000),
+        cache: "no-store",
+      } as RequestInit);
+    } catch (cause) {
+      await upload.body.cancel().catch(() => undefined);
+      throw shopifyError("provider_error", "Uploading the image to Shopify failed.", { cause });
+    }
+    if (!uploaded.ok) {
+      await uploaded.body?.cancel().catch(() => undefined);
+      throw shopifyError(
+        uploaded.status === 400 ? "invalid_input" : "provider_error",
+        `Shopify's upload target responded ${uploaded.status}.`,
+        {
+          retryable: uploaded.status >= 500 || uploaded.status === 429 || uploaded.status === 403,
+        },
+      );
+    }
+
+    const attached = await gql<AttachImageData>(creds, PRODUCT_ATTACH_IMAGE_MUTATION, {
+      product: { id: input.productId },
+      media: [
+        {
+          originalSource: target.resourceUrl,
+          mediaContentType: "IMAGE",
+          ...(input.alt?.trim() ? { alt: input.alt.trim().slice(0, 512) } : {}),
+        },
+      ],
+    });
+    const errors = attached.productUpdate.userErrors;
+    if (errors.some(isProductMissingError) || (!attached.productUpdate.product && !errors.length)) {
+      throw shopifyError("not_found", "Shopify product not found.", { retryable: false });
+    }
+    assertNoUserErrors("productUpdate media", errors);
+    // Usually still processing (no URL yet); a later read finds it by marker.
+    return (await findOwnImage(creds, input.productId, marker)) ?? { mediaId: null, url: null };
   }
 
   async function createStagedTarget(

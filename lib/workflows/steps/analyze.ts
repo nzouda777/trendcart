@@ -10,6 +10,8 @@
  *   once right away; further failures go to the runner's backoff, and every
  *   runner attempt resolves a fresh URL too.
  * - Product link: the analyzer reads the page itself.
+ * - Image search: the uploaded photo (pending_image, with a signed URL kept as
+ *   the reference image for the reverse image search) or the pasted image link.
  * - The AI call goes through `metered` (monthly cap + usage_monthly + job cost).
  * - After GATE 1 rejections, the analyzer gets a `hint` (notes and the
  *   product names it got wrong, most recent first).
@@ -27,7 +29,8 @@ import {
   type AnalyzeInput,
   type CallContext,
 } from "@/lib/domain/contracts";
-import { approval, brand, video } from "@/lib/db/schema";
+import { approval, brand, pendingImage, video } from "@/lib/db/schema";
+import { isUploadSourceUrl, publicImageUrl } from "@/lib/media/images";
 import type { ScopedDb } from "@/lib/tenant/scoped-db";
 import { candidateVideoFields, resolveFreshMedia } from "@/lib/media/candidates";
 
@@ -63,6 +66,39 @@ async function resolveTikTokInput(
     caption: resolved.caption,
     thumbnailUrl: resolved.thumbnailUrl,
   };
+}
+
+/**
+ * Image search input: the uploaded photo (bytes, plus a signed URL that
+ * becomes the reference image for the reverse image search), or the image
+ * link the user pasted.
+ */
+async function resolveImageInput(
+  { ctx }: StepEnv,
+  productId: string,
+  sourceUrl: string,
+): Promise<AnalyzeInput> {
+  const stored = await ctx.db.findFirst(
+    pendingImage,
+    and(eq(pendingImage.productId, productId), eq(pendingImage.purpose, "search")),
+  );
+  if (stored) {
+    return {
+      source: "image",
+      imageUrl: publicImageUrl(stored.id),
+      imageBase64: stored.dataBase64,
+      mediaType: stored.mimeType as "image/jpeg",
+    };
+  }
+  if (isUploadSourceUrl(sourceUrl)) {
+    throw new IntegrationError(
+      "trendcart",
+      "invalid_input",
+      "The uploaded photo is no longer available. Import the image again.",
+      { retryable: false },
+    );
+  }
+  return { source: "image", imageUrl: sourceUrl };
 }
 
 const MAX_HINT_NOTE = 2000;
@@ -138,6 +174,8 @@ export const analyzeStep: StepDefinition = {
         if (!isExpiredMedia(error)) throw error;
         result = await analyze(await resolveTikTokInput(env, call, row.id, row.sourceUrl));
       }
+    } else if (row.sourceType === "image") {
+      result = await analyze(await resolveImageInput(env, row.id, row.sourceUrl));
     } else {
       result = await analyze({ source: "product_link", url: row.sourceUrl });
     }

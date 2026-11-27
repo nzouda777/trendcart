@@ -53,6 +53,8 @@ export const auditActionSchema = z.enum([
   "page.publish",
   /** A GATE 3 publish failed and was rolled back (product back to DRAFT, approval voided). */
   "page.publish_revert",
+  /** Images a user uploaded were added to the Shopify product. */
+  "page.media_upload",
   "video.approve",
   "video.reject",
   "video.publish",

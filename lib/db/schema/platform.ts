@@ -121,4 +121,42 @@ export const platformAuditLog = pgTable(
   ],
 );
 
-export const platformTables = { plan, platformSetting, stripeEvent, platformAuditLog };
+/**
+ * A Shopify store that installed the public app from Shopify (App Store or
+ * install link) and finished OAuth before any Trendcart workspace claimed it.
+ * Shopify requires OAuth right after install, before any app UI (App Store
+ * requirement 2.3.2), so the token is parked here, encrypted, until a signed-in
+ * user picks the workspace and brand (lib/integrations/shopify/app-store-install).
+ * No workspace_id: it belongs to no tenant yet. Read and written only by that
+ * module and the Shopify webhooks; rows expire after a day.
+ */
+export const shopifyPendingInstall = pgTable(
+  "shopify_pending_install",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    shopDomain: text("shop_domain").notNull(),
+    accessTokenEnc: text("access_token_enc").notNull(),
+    refreshTokenEnc: text("refresh_token_enc"),
+    tokenExpiresAt: tz("token_expires_at"),
+    refreshTokenExpiresAt: tz("refresh_token_expires_at"),
+    scopes: jsonb("scopes").$type<string[]>().notNull(),
+    /** sha256 of the claim secret held in the installing browser's cookie. */
+    claimHash: text("claim_hash").notNull(),
+    expiresAt: tz("expires_at").notNull(),
+    createdAt: tz("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("shopify_pending_install_shop_uidx").on(t.shopDomain),
+    index("shopify_pending_install_expires_idx").on(t.expiresAt),
+  ],
+);
+
+export const platformTables = {
+  plan,
+  platformSetting,
+  stripeEvent,
+  platformAuditLog,
+  shopifyPendingInstall,
+};

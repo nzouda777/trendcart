@@ -1,0 +1,37 @@
+# Trendcart public Shopify app configuration (Shopify CLI: `shopify app deploy`).
+# Docs: https://shopify.dev/docs/apps/build/cli-for-apps/app-configuration
+#
+# Replace client_id and the URLs with the production values before deploying.
+# client_id is SHOPIFY_API_KEY; the secret (SHOPIFY_API_SECRET) never goes here.
+
+client_id = "REPLACE_WITH_SHOPIFY_API_KEY"
+name = "Trendcart"
+# App URL: Shopify opens it on install, reinstall and "open app" (signed with HMAC).
+application_url = "https://usetrendcart.com/api/shopify/launch"
+# Standalone app: Trendcart runs on its own site, with its own accounts and workspaces.
+embedded = false
+
+[access_scopes]
+# Must match SHOPIFY_SCOPES in lib/integrations/shopify/config.ts.
+scopes = "write_products,read_themes,write_files,write_publications"
+# Optional, requested only when SHOPIFY_THEME_WRITES=1 (needs Shopify's theme exemption).
+optional_scopes = ["write_themes"]
+# Authorization code grant with the scope parameter (standalone app, not token exchange).
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = ["https://usetrendcart.com/api/shopify/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "https://usetrendcart.com/api/shopify/webhooks"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "https://usetrendcart.com/api/shopify/webhooks"
+
+[pos]
+embedded = false

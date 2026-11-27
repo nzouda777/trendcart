@@ -72,7 +72,9 @@ export function createMockProductAnalyzer(): ProductAnalyzer {
       const input = analyzeInputSchema.parse(raw);
       const hint = raw.hint ? analyzeHintSchema.parse(raw.hint) : undefined;
       const isVideo = input.source === "tiktok_video";
-      const first = isVideo ? productFromMediaUrl(input.mediaUrl) : matchSampleProduct(input.url);
+      const first = isVideo
+        ? productFromMediaUrl(input.mediaUrl)
+        : matchSampleProduct(input.source === "image" ? input.imageUrl : input.url);
       const product = skipRejected(first, hint?.rejectedProductNames);
       const retried = product !== first;
       const data: ProductAnalysis = productAnalysisSchema.parse({
@@ -85,7 +87,9 @@ export function createMockProductAnalyzer(): ProductAnalyzer {
         bestFrameSec: isVideo ? product.bestFrameSec : null,
         referenceImageUrl: isVideo
           ? (input.thumbnailUrl ?? sampleImageUrl(`${product.key}-ref`))
-          : sampleImageUrl(`${product.key}-ref`),
+          : input.source === "image"
+            ? input.imageUrl
+            : sampleImageUrl(`${product.key}-ref`),
         confidence: retried ? 0.74 : isVideo ? 0.91 : 0.86,
       });
       const tokens = isVideo ? MOCK_TOKENS.videoAnalysis : MOCK_TOKENS.pageAnalysis;

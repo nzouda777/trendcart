@@ -10,6 +10,8 @@ import "server-only";
  *   Nothing is written to disk.
  * product_link: the page is fetched through the brand proxy, reduced to text
  *   (title, meta, JSON-LD, visible text) and analysed as text.
+ * image (image search, both providers): the uploaded bytes, or the image URL
+ *   fetched through the brand proxy, analysed as one image.
  *
  * Claude cannot take video input:
  * tiktok_video: the cover image (fetched through the brand proxy, at most
@@ -397,6 +399,45 @@ export function createLiveProductAnalyzer(options: LiveAnalyzerOptions = {}): Pr
           await deleteGeminiFile(files, file.name);
         }
         referenceImageUrl = input.thumbnailUrl ?? null;
+      } else if (input.source === "image") {
+        // Image search: Gemini and Claude both take the photo directly.
+        const image = input.imageBase64
+          ? {
+              data: new Uint8Array(Buffer.from(input.imageBase64, "base64")),
+              mediaType: input.mediaType ?? "image/jpeg",
+            }
+          : await loadImage(viaProxy, input.imageUrl, budget);
+        if (!image || image.data.byteLength === 0 || image.data.byteLength > IMAGE_MAX_BYTES) {
+          throw new IntegrationError(
+            provider,
+            "invalid_input",
+            "The image could not be loaded. Use a direct link to a JPEG, PNG, WebP or GIF image (5 MB max), or upload the file.",
+            { retryable: false },
+          );
+        }
+        const res = await run(
+          [
+            {
+              role: "user",
+              content: [
+                { type: "image" as const, image: image.data, mediaType: image.mediaType },
+                {
+                  type: "text",
+                  text: prompt(
+                    language,
+                    "You only have this photo of the product (no video, no page). Identify the product from it and lower confidence when the photo is ambiguous. bestFrameSec must be null.",
+                    hint,
+                  ),
+                },
+              ],
+            },
+          ],
+          budget,
+          modelId,
+        );
+        modelOut = { ...res.output, bestFrameSec: null };
+        tokens = { inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens };
+        referenceImageUrl = input.imageUrl;
       } else {
         const page = await extractPage(viaProxy, input.url);
         // Claude also looks at the page's main image (Gemini reads the text, as before).

@@ -73,6 +73,22 @@ export function formatMonth(month: string): string {
 }
 
 /** Host of a URL for compact display ("www.tiktok.com"). */
+/** Products imported from an uploaded photo have no link (source_url "upload:image:<sha256>"). */
+export const isUploadedSource = (url: string) => url.startsWith("upload:image:");
+
+/** Short label of where a product was imported from. */
+export function sourceLabel(
+  sourceType: "tiktok_video" | "product_link" | "image",
+  sourceUrl: string,
+  short = false,
+): string {
+  if (sourceType === "tiktok_video") return short ? "TikTok" : "TikTok video";
+  if (sourceType === "image") {
+    return isUploadedSource(sourceUrl) ? "Uploaded photo" : `Image · ${hostOf(sourceUrl)}`;
+  }
+  return hostOf(sourceUrl);
+}
+
 export function hostOf(url: string): string {
   try {
     return new URL(url).host;

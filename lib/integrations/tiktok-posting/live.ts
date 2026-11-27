@@ -61,6 +61,10 @@ const publishInputSchema = z.object({
   /** TikTok title: at most 2200 UTF-16 code units. */
   caption: z.string().max(2200),
   privacyLevel: tiktokPrivacyLevelSchema,
+  interactions: z
+    .object({ allowComment: z.boolean(), allowDuet: z.boolean(), allowStitch: z.boolean() })
+    .optional(),
+  disclosure: z.object({ yourBrand: z.boolean(), brandedContent: z.boolean() }).optional(),
 });
 
 const initDataSchema = z.object({
@@ -209,6 +213,7 @@ export function createLiveTikTokPostingClient(
       const avatar = z.url().safeParse(data.creator_avatar_url);
       return tiktokCreatorInfoSchema.parse({
         displayName: data.creator_nickname || data.creator_username || "TikTok creator",
+        username: data.creator_username || undefined,
         avatarUrl: avatar.success ? avatar.data : undefined,
         privacyLevelOptions: data.privacy_level_options.flatMap((p) => {
           const level = tiktokPrivacyLevelSchema.safeParse(p);
@@ -234,6 +239,15 @@ export function createLiveTikTokPostingClient(
         allowStubbedSideEffectsUnderTest: options.allowStubbedSideEffectsUnderTest,
       });
       const tokenKey = keyForSecret(input.accessToken);
+      // TikTok: branded content (paid partnership) cannot be private.
+      if (input.disclosure?.brandedContent && privacy === "SELF_ONLY") {
+        throw new IntegrationError(
+          TIKTOK_POSTING_PROVIDER,
+          "invalid_input",
+          "Branded content visibility cannot be set to private.",
+          { retryable: false },
+        );
+      }
 
       // 1. Creator info right before posting (Direct Post UX rules): the
       //    creator must be able to post now and offer the privacy level.
@@ -269,9 +283,18 @@ export function createLiveTikTokPostingClient(
               post_info: {
                 title: input.caption,
                 privacy_level: privacy,
-                disable_comment: creator.commentDisabled,
-                disable_duet: creator.duetDisabled,
-                disable_stitch: creator.stitchDisabled,
+                // A setting the creator disabled stays off; otherwise the user's choice.
+                disable_comment:
+                  creator.commentDisabled ||
+                  (input.interactions ? !input.interactions.allowComment : false),
+                disable_duet:
+                  creator.duetDisabled ||
+                  (input.interactions ? !input.interactions.allowDuet : false),
+                disable_stitch:
+                  creator.stitchDisabled ||
+                  (input.interactions ? !input.interactions.allowStitch : false),
+                brand_organic_toggle: input.disclosure?.yourBrand ?? false,
+                brand_content_toggle: input.disclosure?.brandedContent ?? false,
               },
               source_info: {
                 source: "FILE_UPLOAD",

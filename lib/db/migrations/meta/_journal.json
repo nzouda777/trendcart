@@ -71,6 +71,20 @@
       "when": 1795412925617,
       "tag": "0009_m5_admin_ai_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795573998148,
+      "tag": "0010_images_and_shopify_public_install",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795580644133,
+      "tag": "0011_tiktok_post_link",
+      "breakpoints": true
     }
   ]
 }

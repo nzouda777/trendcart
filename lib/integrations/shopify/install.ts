@@ -14,7 +14,8 @@ import type { WorkspaceContext } from "@/lib/tenant/context";
 import { appCredentialsFor, clientSecretAad, tokenColumns } from "./credentials";
 import { shopifyError } from "./errors";
 import { normalizeShopDomain } from "./hmac";
-import type { ShopifyAdapter } from "./types";
+import type { ShopifyAdapter, ShopifyInstallToken } from "./types";
+import type { ShopifyAppCredentials } from "@/lib/domain/contracts";
 import { assertWithinLimit } from "@/lib/services/internal/entitlements";
 
 /*
@@ -169,10 +170,51 @@ export async function completeShopifyInstall(
 
   const token = await deps.client.completeInstall({ query, expectedState: flow.state, app });
 
+  return saveShopifyConnection(
+    ctx,
+    {
+      brandId: data.brandId,
+      shopDomain: data.shopDomain,
+      appMode: data.appMode,
+      token,
+      app,
+      connectionId: data.connectionId,
+    },
+    deps,
+  );
+}
+
+/**
+ * Stores a freshly authorized store on the workspace: upserts the connection
+ * on (workspace, shop) with the encrypted offline token, audits it, then
+ * ensures the metafield definitions (best effort). Shared by the in-app
+ * install callback and the claim of a store installed from Shopify
+ * (./app-store-install). Callers check `connection:create` and the brand.
+ */
+export async function saveShopifyConnection(
+  ctx: WorkspaceContext,
+  input: {
+    brandId: string;
+    shopDomain: string;
+    appMode: "public" | "custom";
+    token: ShopifyInstallToken;
+    app?: ShopifyAppCredentials;
+    /** Id of the pending custom-app row, when one was created at install start. */
+    connectionId?: string;
+    /** Recorded in the audit entry (e.g. "app_store"). */
+    source?: string;
+  },
+  deps: CompleteInstallDeps,
+): Promise<CompleteInstallResult> {
+  const { token, app } = input;
+  const data = input;
+  if (data.appMode === "custom" && !app) {
+    throw shopifyError("invalid_input", "Missing custom app credentials.");
+  }
   const existing = await ctx.db.findFirst(shopifyConnection, (t) =>
     eq(t.shopDomain, data.shopDomain),
   );
-  const connectionId = existing?.id ?? data.connectionId ?? crypto.randomUUID();
+  const connectionId = existing?.id ?? input.connectionId ?? crypto.randomUUID();
   const tokenValues = tokenColumns(connectionId, token);
   const wasActive = existing?.status === "active";
 
@@ -208,6 +250,7 @@ export async function completeShopifyInstall(
         appMode: data.appMode,
         scopes: token.scopes,
         reconnect: Boolean(existing),
+        ...(input.source ? { source: input.source } : {}),
       },
     });
   });

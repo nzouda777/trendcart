@@ -112,6 +112,7 @@ export function createMockTikTokPostingClient(
       assertToken(accessToken);
       return {
         displayName: "Mock Creator",
+        username: "mockcreator",
         avatarUrl: "https://example.com/mock-avatar.png",
         privacyLevelOptions: privacyOptions(),
         maxVideoPostDurationSec: 600,
@@ -128,6 +129,14 @@ export function createMockTikTokPostingClient(
         .parse(input);
       const privacy = tiktokPrivacyLevelSchema.parse(input.privacyLevel);
       assertPrivacyAllowed(privacy, audited);
+      if (input.disclosure?.brandedContent && privacy === "SELF_ONLY") {
+        throw new IntegrationError(
+          TIKTOK_POSTING_PROVIDER,
+          "invalid_input",
+          "Branded content visibility cannot be set to private.",
+          { retryable: false },
+        );
+      }
       // Like live: the level must be one the creator offers (creator_info).
       if (!privacyOptions().includes(privacy)) {
         throw new IntegrationError(

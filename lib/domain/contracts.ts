@@ -487,6 +487,21 @@ export interface ShopifyClient {
       proxyUrl?: string;
     },
   ): Promise<ShopifyMediaRef>;
+  /**
+   * Uploads image bytes a user gave us (staged upload, held in memory only)
+   * and adds them to the product's media. Idempotent per `idempotencyKey`
+   * (the image's sha256). `url` is null while Shopify still processes it.
+   */
+  attachImage(
+    creds: ShopifyCredentials,
+    input: {
+      productId: string;
+      data: Uint8Array;
+      mimeType: string;
+      idempotencyKey: string;
+      alt?: string;
+    },
+  ): Promise<{ mediaId: string | null; url: string | null }>;
   deleteProductMedia(
     creds: ShopifyCredentials,
     input: { productId: string; mediaIds: string[] },
@@ -655,6 +670,8 @@ export type TikTokPrivacyLevel = z.infer<typeof tiktokPrivacyLevelSchema>;
 
 export const tiktokCreatorInfoSchema = z.object({
   displayName: z.string(),
+  /** Unique TikTok handle (creator_username), without "@". */
+  username: z.string().optional(),
   avatarUrl: z.url().optional(),
   privacyLevelOptions: z.array(tiktokPrivacyLevelSchema),
   maxVideoPostDurationSec: z.number().int().positive(),
@@ -691,6 +708,18 @@ export interface TikTokPostingClient {
     sourceUrl: string;
     caption: string;
     privacyLevel: TikTokPrivacyLevel;
+    /**
+     * Interactions the user turned on (Direct Post UX: all off by default).
+     * Omitted: the creator's own settings apply. A setting the creator
+     * disabled stays disabled whatever is asked.
+     */
+    interactions?: { allowComment: boolean; allowDuet: boolean; allowStitch: boolean };
+    /**
+     * Commercial content disclosure: yourBrand = brand_organic_toggle
+     * ("Promotional content"), brandedContent = brand_content_toggle ("Paid
+     * partnership", never with SELF_ONLY).
+     */
+    disclosure?: { yourBrand: boolean; brandedContent: boolean };
     /** Brand proxy for the source reads (HEAD / Range) from the Shopify URL. */
     proxyUrl?: string;
   }): Promise<{ publishId: string }>;
@@ -799,6 +828,17 @@ export const analyzeInputSchema = z.discriminatedUnion("source", [
     thumbnailUrl: z.url().optional(),
   }),
   z.object({ source: z.literal("product_link"), url: z.url() }),
+  z.object({
+    source: z.literal("image"),
+    /**
+     * Public URL of the image: the one the user pasted, or a signed, expiring
+     * URL of an uploaded image (lib/media/images). Becomes referenceImageUrl.
+     */
+    imageUrl: z.url(),
+    /** Uploaded image bytes (base64), so the analyzer does not fetch them again. */
+    imageBase64: z.string().min(1).optional(),
+    mediaType: z.enum(["image/jpeg", "image/png", "image/webp", "image/gif"]).optional(),
+  }),
 ]);
 export type AnalyzeInput = z.infer<typeof analyzeInputSchema>;
 

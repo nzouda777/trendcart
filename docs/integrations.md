@@ -24,49 +24,47 @@ reads them yet.
 
 ## Shopify app
 
-Trendcart connects stores from different Shopify accounts, so it uses one **public app,
-distributed unlisted** (not on the App Store). It is a non-embedded app: Trendcart runs on its
-own domain, not inside the Shopify admin.
+Trendcart connects stores from different Shopify accounts, so it uses one **public app**
+that any store can install (App Store listing, or an install link while the listing is
+unlisted). It is a non-embedded (standalone) app: Trendcart runs on its own domain, with its own
+accounts and workspaces, not inside the Shopify admin.
 
-1. In the Shopify Partner Dashboard (or Dev Dashboard), create an app and choose public,
-   unlisted distribution.
+1. In the Shopify Dev Dashboard, create the app with public distribution.
 2. Copy the client ID to `SHOPIFY_API_KEY` and the client secret to `SHOPIFY_API_SECRET`. The
-   secret also verifies OAuth callback and webhook HMAC signatures.
-3. Register the redirect URL `<site>/api/shopify/callback`.
-4. Access scopes (from `lib/integrations/shopify/config.ts`, `SHOPIFY_SCOPES`):
-   - `write_products`: metafield definitions, products, product media.
-   - `read_themes`: read `templates/product*.json` of the live theme (never written).
-   - `write_files`: staged uploads for product videos (M3) and media deletion.
-   - `write_publications`: publish to the Online Store channel (used by Gate 3 since M2).
+   secret also verifies the app URL, OAuth callback and webhook HMAC signatures.
+3. Deploy the configuration in `shopify.app.toml` (repo root) with the Shopify CLI
+   (`shopify app deploy`) after replacing `client_id` and the URLs:
+   - App URL `<site>/api/shopify/launch`, redirect URL `<site>/api/shopify/callback`.
+   - Access scopes (`SHOPIFY_SCOPES` in `lib/integrations/shopify/config.ts`):
+     `write_products` (metafield definitions, products, product media), `read_themes` (read
+     `templates/product*.json`), `write_files` (staged uploads for product videos and uploaded
+     photos, media deletion), `write_publications` (publish to the Online Store). The install
+     fails with `Missing Shopify scopes` if the merchant grants fewer.
+   - Webhooks on `<site>/api/shopify/webhooks`: `app/uninstalled` plus the mandatory compliance
+     topics `customers/data_request`, `customers/redact`, `shop/redact`.
+4. Once the app has its install page (App Store listing or install link), set
+   `SHOPIFY_APP_INSTALL_URL`. "Connect a store" then sends merchants to Shopify instead of
+   asking for a shop domain (App Store requirement 2.3.1). Leave it empty in development: the
+   store-domain form starts the install from Trendcart.
 
-   The install fails with `Missing Shopify scopes` if the merchant grants fewer.
-5. Webhooks, all on one endpoint `<site>/api/shopify/webhooks` (routed by `X-Shopify-Topic`):
-   `app/uninstalled` plus the mandatory compliance topics `customers/data_request`,
-   `customers/redact`, `shop/redact`.
+**Install started from Shopify** (`lib/integrations/shopify/app-store-install.ts`). Shopify
+opens `/api/shopify/launch?shop&hmac&timestamp`. Trendcart verifies the HMAC (and refuses links
+older than 24 h), then:
 
-Example `shopify.app.toml` (the file is not in this repo; keep it in the app's Shopify CLI
-project):
+- the store already works in the signed-in user's workspace: opens the app;
+- signed out, and a workspace already has the store: sign-in, then the app;
+- otherwise (install, reinstall): OAuth starts immediately, before any Trendcart screen (App
+  Store requirements 2.3.2 and 2.3.4). The callback parks the offline token, encrypted, in
+  `shopify_pending_install` (no workspace yet, expires after 24 h) and gives the browser a
+  claim cookie. After sign-in or sign-up, `/app/connections/shopify-claim` asks for the brand
+  (role Media buyer or higher, plan store limit applies) and moves the token to the
+  workspace's connection. `app/uninstalled` and `shop/redact` also drop a parked token.
 
-```toml
-client_id = "<SHOPIFY_API_KEY>"
-name = "Trendcart"
-application_url = "https://<site>/app/connections"
-embedded = false
-
-[access_scopes]
-scopes = "write_products,read_themes,write_files,write_publications"
-
-[auth]
-redirect_urls = ["https://<site>/api/shopify/callback"]
-
-[webhooks]
-api_version = "2026-10"
-
-[[webhooks.subscriptions]]
-topics = ["app/uninstalled"]
-compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
-uri = "https://<site>/api/shopify/webhooks"
-```
+**Before App Store submission.** Shopify recommends embedded apps (App Bridge) and, for Built
+for Shopify, requires them. Trendcart is standalone, which the App Store review may question.
+Shopify also requires public apps to restrict Admin API access to the app's server IP
+addresses (deadline 2026-11-20): enable static outbound IPs on Vercel and add them in the Dev
+Dashboard.
 
 **API version.** Pinned to `2026-10` (`DEFAULT_SHOPIFY_API_VERSION`, the latest stable,
 released 2026-10-01 and supported until 2027-10-16). `SHOPIFY_API_VERSION` overrides it. It
@@ -92,11 +90,19 @@ only):
 | Revert a failed publish | `productUpdate(product: { id, status: DRAFT })` | `productChangeStatus` is deprecated in 2026-10. Setting DRAFT on a draft is a no-op success, so the call is idempotent |
 | List product templates | `themes(roles: [MAIN])` with `files(filenames: ["templates/product*.json"])` | Live theme only, read-only. Liquid product templates (vintage themes) are not listed |
 | Delete media (ready for M3) | `fileDelete` | Rejected videos |
+| Add an uploaded photo | `stagedUploadsCreate(resource: IMAGE)`, multipart POST, `productUpdate(media)` | Photos users upload (product photos, image search). Filename `tcu-<hash>`, so `productSet` keeps them as merchant media; idempotent per image hash. Trendcart deletes its copy once Shopify has it |
 
-**Custom app per store (optional).** A merchant can instead create an app in their own store
-and paste its client ID and secret in **Connections, "Use a custom app from the store's admin
-instead"**. The secret is stored encrypted for that connection and used for its OAuth and
-webhook signatures. Register the same redirect URL and webhook endpoint on that app.
+**Own app per store (default).** Shopify only lists embedded apps, and Trendcart is
+standalone, so each store connects through an app its owner creates in the Dev Dashboard
+(Settings > Apps > Develop apps), and pastes its client ID and secret in **Connections**. App
+URL `<site>/app/connections`, redirect URL `<site>/api/shopify/callback`, the scopes above,
+embedding off; the owner does not click Install (Trendcart's OAuth installs it). Apps a merchant
+creates for their own store need no IP allowlist; an app created in a Partner organization and
+installed on another organization's store does. The secret is stored encrypted for that
+connection and used for its OAuth and webhook signatures. Step-by-step for users:
+[client/trendcart-comptes-api.md](client/trendcart-comptes-api.md#connecting-a-shopify-store)
+and the in-app guide (`/app/guide#shopify-app`). The shared public app above is only offered in
+Connections when `SHOPIFY_API_KEY` is set.
 
 **What happens on install.** Trendcart creates three product metafield definitions in the
 `custom` namespace: `highlights` (list of single-line text), `faq` (JSON), `guarantee`
@@ -235,11 +241,9 @@ in-memory counters, which is fine locally but not on Vercel.
 
 ## Vercel Cron
 
-`vercel.json` declares one cron:
-
-```json
-{ "crons": [{ "path": "/api/cron/tiktok-token-refresh", "schedule": "15 * * * *" }] }
-```
+`vercel.json` declares the crons: `/api/cron/tiktok-token-refresh`, `/api/cron/tiktok-stats`
+and `/api/cron/purge-images` (daily: deletes uploaded photos that waited more than 14 days for a
+Shopify page, since Trendcart keeps no files).
 
 Set `CRON_SECRET` in the Vercel project (for example `openssl rand -base64 32`). Vercel sends it
 as `Authorization: Bearer <CRON_SECRET>`; the route returns 401 for anything else, and for every

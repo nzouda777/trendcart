@@ -23,6 +23,7 @@ const services = vi.hoisted(() => ({
   approveVideo: vi.fn(),
   approveVideos: vi.fn(),
   publishToProfile: vi.fn(),
+  getTikTokPostingInfo: vi.fn(),
   recheckVideo: vi.fn(),
   refreshTikTokPosts: vi.fn(),
   rejectVideo: vi.fn(),
@@ -38,7 +39,6 @@ const {
   refreshTikTokPostsAction,
   rejectVideoAction,
 } = await import("./video-actions");
-const { DISCLOSURE_UNSUPPORTED } = await import("@/components/app/product/action-markers");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -214,7 +214,9 @@ const POST = {
   profileConnectionId: "pr1",
   caption: "  Find of the week  ",
   privacyLevel: "SELF_ONLY" as const,
+  interactions: { allowComment: false, allowDuet: false, allowStitch: false },
   disclosure: { enabled: false, yourBrand: false, brandedContent: false },
+  consent: true as const,
 };
 
 describe("publishToProfileAction", () => {
@@ -228,8 +230,18 @@ describe("publishToProfileAction", () => {
         profileConnectionId: "pr1",
         caption: "Find of the week",
         privacyLevel: "SELF_ONLY",
+        interactions: { allowComment: false, allowDuet: false, allowStitch: false },
       },
     );
+  });
+
+  it("refuses a post without the publishing consent", async () => {
+    const result = await publishToProfileAction({
+      ...POST,
+      consent: false as unknown as true,
+    });
+    expect(!result.ok && result.fieldErrors?.consent).toBeTruthy();
+    expect(services.publishToProfile).not.toHaveBeenCalled();
   });
 
   it("requires an explicit privacy level (no default)", async () => {
@@ -248,17 +260,22 @@ describe("publishToProfileAction", () => {
     expect(services.publishToProfile).not.toHaveBeenCalled();
   });
 
-  it("never publishes a disclosed post unlabelled", async () => {
-    const result = await publishToProfileAction({
+  it("passes the interactions and the commercial content disclosure through", async () => {
+    services.publishToProfile.mockResolvedValue({});
+    await publishToProfileAction({
       ...POST,
-      disclosure: { enabled: true, yourBrand: true, brandedContent: false },
+      privacyLevel: "PUBLIC_TO_EVERYONE",
+      interactions: { allowComment: true, allowDuet: false, allowStitch: true },
+      disclosure: { enabled: true, yourBrand: true, brandedContent: true },
     });
-    expect(result).toMatchObject({
-      ok: false,
-      code: "precondition_failed",
-      error: DISCLOSURE_UNSUPPORTED,
-    });
-    expect(services.publishToProfile).not.toHaveBeenCalled();
+    expect(services.publishToProfile).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        privacyLevel: "PUBLIC_TO_EVERYONE",
+        interactions: { allowComment: true, allowDuet: false, allowStitch: true },
+        disclosure: { yourBrand: true, brandedContent: true },
+      }),
+    );
   });
 
   it("requires a disclosure type and refuses private branded content", async () => {

@@ -76,8 +76,11 @@ export function DuplicatesPanel(props: DuplicatesPanelProps) {
           hint={
             <>
               Saved in{" "}
-              <Link href="/app/brands" className="text-brand-text underline underline-offset-4">
-                Brands, Campaign settings
+              <Link
+                href="/app/campaigns?tab=settings"
+                className="text-brand-text underline underline-offset-4"
+              >
+                Campaigns, Campaign settings
               </Link>
               .
             </>

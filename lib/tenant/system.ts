@@ -3,7 +3,13 @@ import "server-only";
 import { and, asc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
-import { campaign, shopifyConnection, tiktokProfileConnection } from "@/lib/db/schema";
+import {
+  campaign,
+  pendingImage,
+  shopifyConnection,
+  shopifyPendingInstall,
+  tiktokProfileConnection,
+} from "@/lib/db/schema";
 import type { Database } from "@/lib/db/types";
 
 import { createSystemContext, type WorkspaceContext } from "./context";
@@ -46,6 +52,29 @@ export async function findShopifyConnectionsByShopDomain(
     .from(shopifyConnection)
     .where(eq(shopifyConnection.shopDomain, domain))
     .orderBy(asc(shopifyConnection.createdAt), asc(shopifyConnection.id));
+}
+
+/**
+ * Whether any workspace holds a working (active or expiring) connection for
+ * this shop. Used by the Shopify app URL to tell "open the app" from
+ * "install": call only after the launch HMAC was verified.
+ */
+export async function shopHasUsableConnection(
+  shop: string,
+  db: Database = getDb(),
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: shopifyConnection.id })
+    .from(shopifyConnection)
+    .where(
+      and(
+        eq(shopifyConnection.shopDomain, shop.trim().toLowerCase()),
+        or(eq(shopifyConnection.status, "active"), eq(shopifyConnection.status, "expiring")),
+        isNotNull(shopifyConnection.accessTokenEnc),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
 }
 
 /**
@@ -129,4 +158,82 @@ export async function markCampaignStatsSynced(
     },
     eq(campaign.id, campaignId),
   );
+}
+
+/**
+ * One pending image by id, across workspaces, for the signed image route.
+ * Call only after the URL signature was verified (lib/media/images): the
+ * signature is what authorizes the read. Returns the bytes and type only.
+ */
+export async function readSignedPendingImage(
+  imageId: string,
+  db: Database = getDb(),
+): Promise<{ mimeType: string; dataBase64: string } | null> {
+  const [row] = await db
+    .select({ mimeType: pendingImage.mimeType, dataBase64: pendingImage.dataBase64 })
+    .from(pendingImage)
+    .where(eq(pendingImage.id, imageId))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Cron: deletes pending images created before `before` (their product never reached Shopify). */
+export async function purgePendingImagesBefore(
+  before: Date,
+  db: Database = getDb(),
+): Promise<number> {
+  const rows = await db
+    .delete(pendingImage)
+    .where(lt(pendingImage.createdAt, before))
+    .returning({ id: pendingImage.id });
+  return rows.length;
+}
+
+/* Shopify installs not claimed by a workspace yet (lib/integrations/shopify/app-store-install). */
+
+export type PendingInstallRow = typeof shopifyPendingInstall.$inferSelect;
+export type PendingInstallValues = Omit<
+  typeof shopifyPendingInstall.$inferInsert,
+  "id" | "shopDomain" | "createdAt"
+>;
+
+/** Upserts the parked token of a shop (one row per shop) and drops expired rows. */
+export async function savePendingShopifyInstall(
+  shopDomain: string,
+  values: PendingInstallValues,
+  now: Date,
+  db: Database = getDb(),
+): Promise<void> {
+  await db.delete(shopifyPendingInstall).where(lt(shopifyPendingInstall.expiresAt, now));
+  await db
+    .insert(shopifyPendingInstall)
+    .values({ shopDomain, ...values })
+    .onConflictDoUpdate({ target: shopifyPendingInstall.shopDomain, set: values });
+}
+
+export async function findPendingShopifyInstall(
+  shopDomain: string,
+  db: Database = getDb(),
+): Promise<PendingInstallRow | null> {
+  const [row] = await db
+    .select()
+    .from(shopifyPendingInstall)
+    .where(eq(shopifyPendingInstall.shopDomain, shopDomain))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Deletes a shop's parked token (claimed, uninstalled or redacted). `id` narrows to one row. */
+export async function deletePendingShopifyInstall(
+  shopDomain: string,
+  id?: string,
+  db: Database = getDb(),
+): Promise<void> {
+  await db
+    .delete(shopifyPendingInstall)
+    .where(
+      id
+        ? and(eq(shopifyPendingInstall.shopDomain, shopDomain), eq(shopifyPendingInstall.id, id))
+        : eq(shopifyPendingInstall.shopDomain, shopDomain),
+    );
 }

@@ -661,7 +661,92 @@ const publishSchema = z.object({
   caption: z.string().trim().min(1).max(MAX_CAPTION).optional(),
   /** Only honoured once the app passed TikTok's audit; SELF_ONLY otherwise. */
   privacyLevel: tiktokPrivacyLevelSchema.optional(),
+  /** Interactions the user turned on (TikTok Direct Post UX: all off by default). */
+  interactions: z
+    .object({ allowComment: z.boolean(), allowDuet: z.boolean(), allowStitch: z.boolean() })
+    .optional(),
+  /** Commercial content disclosure (Promotional content / Paid partnership labels). */
+  disclosure: z.object({ yourBrand: z.boolean(), brandedContent: z.boolean() }).optional(),
 });
+
+/** Video length from the provider metadata, when known. */
+function videoDurationSec(row: Row<typeof video>): number | null {
+  const value = (row.metadata as { durationSec?: unknown } | null)?.durationSec;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export type TikTokPostingInfoDTO = {
+  profileConnectionId: string;
+  /** creator_nickname: shown on the posting screen (TikTok Direct Post UX). */
+  displayName: string;
+  /** creator_username, without "@". */
+  username: string | null;
+  avatarUrl: string | null;
+  /** Levels the creator offers (creator_info), only SELF_ONLY while the app is unaudited. */
+  privacyLevelOptions: TikTokPrivacyLevel[];
+  commentDisabled: boolean;
+  duetDisabled: boolean;
+  stitchDisabled: boolean;
+  maxVideoPostDurationSec: number;
+  videoDurationSec: number | null;
+  /** The video is longer than the creator may post. */
+  tooLong: boolean;
+};
+
+const postingInfoSchema = z.object({ videoId: idSchema, profileConnectionId: idSchema });
+
+/**
+ * Fresh creator_info for the posting screen (TikTok Direct Post UX rules):
+ * nickname and handle, the privacy levels the creator offers, which
+ * interactions their account disables, and the longest video they may post.
+ * TikTok errors (posting cap reached, banned from posting) reach the caller:
+ * the screen then tells the user to try again later.
+ */
+export async function getTikTokPostingInfo(
+  ctx: WorkspaceContext,
+  input: z.input<typeof postingInfoSchema>,
+  deps: ServiceDeps = {},
+): Promise<TikTokPostingInfoDTO> {
+  requirePermission(ctx, "video:publish");
+  const v = postingInfoSchema.parse(input);
+  const integrations = resolveIntegrations(deps);
+  const target = await ctx.db.getById(video, v.videoId);
+  const row = await ctx.db.getById(product, target.productId);
+  const profile = await ctx.db.findById(tiktokProfileConnection, v.profileConnectionId);
+  if (!profile || profile.brandId !== row.brandId) {
+    throw new ServiceError("invalid_input", "This TikTok profile is not connected to the brand.");
+  }
+  if (!USABLE_CONNECTION.has(profile.status)) {
+    throw new ServiceError("precondition_failed", "This TikTok profile needs to be reconnected.");
+  }
+  const tokens = await getTikTokProfileTokens(ctx, profile.id);
+  let creator;
+  try {
+    creator = await integrations.tiktokPosting.getCreatorInfo({ accessToken: tokens.accessToken });
+  } catch (error) {
+    if (error instanceof IntegrationError && error.code === "auth_expired") {
+      await markConnectionNeedsReauth(ctx, "tiktok_profile", profile.id, error.message);
+    }
+    throw error;
+  }
+  const audited = isPostingAudited();
+  const duration = videoDurationSec(target);
+  return {
+    profileConnectionId: profile.id,
+    displayName: creator.displayName,
+    username: creator.username ?? null,
+    avatarUrl: creator.avatarUrl ?? null,
+    privacyLevelOptions: audited
+      ? creator.privacyLevelOptions
+      : creator.privacyLevelOptions.filter((p) => p === "SELF_ONLY"),
+    commentDisabled: creator.commentDisabled,
+    duetDisabled: creator.duetDisabled,
+    stitchDisabled: creator.stitchDisabled,
+    maxVideoPostDurationSec: creator.maxVideoPostDurationSec,
+    videoDurationSec: duration,
+    tooLong: duration !== null && duration > creator.maxVideoPostDurationSec,
+  };
+}
 
 function captionFor(row: ProductRow, input?: string): string {
   if (input) return input;
@@ -717,6 +802,12 @@ export async function publishToProfile(
     );
   }
   const privacyLevel: TikTokPrivacyLevel = audited ? (v.privacyLevel ?? "SELF_ONLY") : "SELF_ONLY";
+  if (v.disclosure?.brandedContent && privacyLevel === "SELF_ONLY") {
+    throw new ServiceError(
+      "invalid_input",
+      "Branded content visibility cannot be set to private. Choose who can see this post.",
+    );
+  }
 
   // Claim the (video, profile) post.
   const post = await ctx.db.transaction(async (tx) => {
@@ -749,16 +840,33 @@ export async function publishToProfile(
     const tokens = await getTikTokProfileTokens(ctx, profile.id);
     // The brand proxy (if any) for the source reads from the Shopify URL.
     const { proxyUrl } = await buildCallContext(ctx.db, row.brandId);
+    // Creator info right before posting: can post now, video not too long.
+    const creator = await integrations.tiktokPosting.getCreatorInfo({
+      accessToken: tokens.accessToken,
+    });
+    const duration = videoDurationSec(target);
+    if (duration !== null && duration > creator.maxVideoPostDurationSec) {
+      throw new ServiceError(
+        "invalid_input",
+        `This video is ${Math.round(duration)} s long; this TikTok account can post up to ${creator.maxVideoPostDurationSec} s.`,
+      );
+    }
     const { publishId } = await integrations.tiktokPosting.publishVideoFromUrl({
       accessToken: tokens.accessToken,
       sourceUrl: target.shopifyFileUrl,
       caption,
       privacyLevel,
+      ...(v.interactions ? { interactions: v.interactions } : {}),
+      ...(v.disclosure ? { disclosure: v.disclosure } : {}),
       ...(proxyUrl ? { proxyUrl } : {}),
     });
 
     await ctx.db.transaction(async (tx) => {
-      await tx.update(tiktokPost, { publishId, status: "processing" }, eq(tiktokPost.id, post.id));
+      await tx.update(
+        tiktokPost,
+        { publishId, status: "processing", creatorUsername: creator.username ?? null },
+        eq(tiktokPost.id, post.id),
+      );
       await writeAudit(
         { ...ctx, db: tx },
         {
@@ -770,6 +878,8 @@ export async function publishToProfile(
             videoId: target.id,
             profileConnectionId: profile.id,
             privacyLevel,
+            interactions: v.interactions ?? null,
+            disclosure: v.disclosure ?? null,
             outcome: "submitted",
           },
         },
@@ -858,6 +968,7 @@ export async function refreshTikTokPosts(
           tiktokPost,
           {
             status: next,
+            postId: status.postIds[0] ?? null,
             error:
               next === "failed"
                 ? (status.failReason ?? "TikTok refused the post.").slice(0, 500)

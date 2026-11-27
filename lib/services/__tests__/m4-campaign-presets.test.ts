@@ -24,6 +24,7 @@ import {
   listCampaignDuplicates,
   pauseDuplicate,
 } from "../campaign-duplicates";
+import { listWorkspaceCampaigns } from "../campaign-list";
 import {
   createCampaignPreset,
   deleteCampaignPreset,
@@ -380,5 +381,32 @@ describe("campaign duplicates", () => {
       duplicateCampaign(env.a.owner, { campaignId: p.campaign!.id, presetId: huge.id }, m.deps),
     ).rejects.toMatchObject({ code: "invalid_input" });
     expect(await listCampaignDuplicates(env.a.viewer, m.productId)).toHaveLength(0);
+  });
+});
+
+describe("workspace campaign list", () => {
+  it("lists the test campaign and its duplicates, with filters, for every member", async () => {
+    const { productId, deps, p } = await launchedProduct();
+    const source = p.campaign!;
+    const { campaignId } = await duplicateCampaign(env.a.owner, { campaignId: source.id }, deps);
+
+    const all = await listWorkspaceCampaigns(env.a.viewer, {});
+    expect(all.map((c) => [c.id, c.kind])).toEqual(
+      expect.arrayContaining([
+        [source.id, "main"],
+        [campaignId, "duplicate"],
+      ]),
+    );
+    const main = all.find((c) => c.id === source.id)!;
+    expect(main).toMatchObject({ productId, brandId, status: "active", onTikTok: true });
+    expect(main.launchedAt).not.toBeNull();
+
+    const toLaunch = await listWorkspaceCampaigns(env.a.viewer, { filter: "to_launch" });
+    expect(toLaunch.map((c) => c.id)).toEqual([campaignId]);
+    const active = await listWorkspaceCampaigns(env.a.viewer, { filter: "active" });
+    expect(active.map((c) => c.id)).toEqual([source.id]);
+
+    // Another workspace sees none of them.
+    expect(await listWorkspaceCampaigns(env.bOwner, {})).toEqual([]);
   });
 });

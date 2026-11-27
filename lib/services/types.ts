@@ -183,6 +183,10 @@ export type TikTokPostDTO = {
   profileName: string | null;
   status: "pending" | "processing" | "published" | "failed";
   error: string | null;
+  /** The creator's TikTok profile (known once posted). */
+  profileUrl: string | null;
+  /** The post on TikTok, once published publicly (private posts have no public id). */
+  postUrl: string | null;
   createdAt: ISODate;
   updatedAt: ISODate;
 };
@@ -191,7 +195,7 @@ export type ProductListItemDTO = {
   id: string;
   brandId: string;
   name: string | null;
-  sourceType: "tiktok_video" | "product_link";
+  sourceType: "tiktok_video" | "product_link" | "image";
   sourceUrl: string;
   status: ProductStatus;
   /** Gate the product waits at (needs a human), or null. */

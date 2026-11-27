@@ -41,6 +41,15 @@ export type AttachVideoInput = {
   proxyUrl?: string;
 };
 
+/**
+ * attachImage input: an image a user uploaded (bytes held in memory only).
+ * `idempotencyKey` is the image's sha256: a re-run never adds a second copy.
+ */
+export type AttachImageInput = Parameters<ShopifyClient["attachImage"]>[1];
+
+/** Where the uploaded image ended up (url is null while Shopify still processes it). */
+export type AttachedImage = Awaited<ReturnType<ShopifyClient["attachImage"]>>;
+
 /** deleteProductTemplate input (QA N6). */
 export type DeleteProductTemplateInput = {
   /** A Trendcart-generated suffix ("tc-..."); anything else is refused before any call. */
@@ -60,6 +69,12 @@ export type DeleteProductTemplateInput = {
 export interface ShopifyAdapter extends ShopifyClient {
   readonly mode: "mock" | "live";
   attachVideoFromUrl(creds: ShopifyCredentials, input: AttachVideoInput): Promise<ShopifyMediaRef>;
+  /**
+   * Verifies the HMAC Shopify signs the app URL with when it opens the app
+   * (install from the App Store or an install link, or "open app" from the
+   * admin): ?shop&hmac&timestamp[&host]. Public app secret only.
+   */
+  verifyLaunchQuery(query: Record<string, string>): boolean;
   completeInstall(input: {
     query: Record<string, string>;
     expectedState: string;

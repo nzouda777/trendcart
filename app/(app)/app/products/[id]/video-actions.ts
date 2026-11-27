@@ -4,16 +4,17 @@ import { refresh } from "next/cache";
 import { z } from "zod";
 
 import type { ActionResult } from "@/components/app/action-result";
-import { DISCLOSURE_UNSUPPORTED } from "@/components/app/product/action-markers";
 import {
   addVideo,
   approveVideo,
   approveVideos,
+  getTikTokPostingInfo,
   publishToProfile,
   recheckVideo,
   refreshTikTokPosts,
   rejectVideo,
   type ServiceFailure,
+  type TikTokPostingInfoDTO,
 } from "@/lib/services";
 
 import { runAction } from "../../_lib/action";
@@ -189,21 +190,51 @@ const publishInput = z.object({
   caption: z.string().trim().min(1, "Write a caption.").max(2200),
   /** Chosen by the user: TikTok's Direct Post rules forbid a default. */
   privacyLevel: z.enum(PRIVACY_LEVELS, { error: "Choose who can see this post." }),
+  /** Allow Comment / Duet / Stitch, each off unless the user turned it on. */
+  interactions: z.object({
+    allowComment: z.boolean(),
+    allowDuet: z.boolean(),
+    allowStitch: z.boolean(),
+  }),
   /** Commercial content disclosure (TikTok Direct Post UX rules). */
   disclosure: z.object({
     enabled: z.boolean(),
     yourBrand: z.boolean(),
     brandedContent: z.boolean(),
   }),
+  /** The user saw and accepted the publishing consent before posting. */
+  consent: z.literal(true, { error: "Confirm that the video will be published to TikTok." }),
 });
 
 export type PublishInput = z.input<typeof publishInput>;
 
 /**
- * Publishes an approved video to a TikTok profile of the brand. The privacy
- * level must be chosen explicitly; the commercial content disclosure is
- * refused while the posting service has no field to carry it, so a
- * promotional post is never published unlabelled.
+ * Fresh creator_info for the posting screen (nickname, handle, privacy
+ * options, disabled interactions, max duration). Called when the screen opens
+ * or the profile changes, as TikTok's Direct Post rules require.
+ */
+export async function getTikTokPostingInfoAction(
+  videoId: string,
+  profileConnectionId: string,
+): Promise<ActionResult<TikTokPostingInfoDTO>> {
+  const result = await runAction((ctx) =>
+    getTikTokPostingInfo(ctx, { videoId, profileConnectionId }),
+  );
+  if (!result.ok && result.code === "integration") {
+    return {
+      ...result,
+      error: `TikTok cannot accept a post from this account right now: ${result.error} Try again later.`,
+    };
+  }
+  return explain(result, {
+    forbidden: "Your role cannot post to TikTok. Ask a Creative or higher.",
+  });
+}
+
+/**
+ * Publishes an approved video to a TikTok profile of the brand, with the
+ * privacy level, interactions and commercial content disclosure the user
+ * chose on the posting screen (TikTok Direct Post UX rules).
  */
 export async function publishToProfileAction(input: PublishInput): Promise<ActionResult> {
   const parsed = publishInput.safeParse(input);
@@ -238,7 +269,6 @@ export async function publishToProfileAction(input: PublishInput): Promise<Actio
         fieldErrors: { privacyLevel: ["branded_content_private"] },
       };
     }
-    return { ok: false, code: "precondition_failed", error: DISCLOSURE_UNSUPPORTED };
   }
   const result = await runAction(async (ctx) => {
     await publishToProfile(ctx, {
@@ -246,6 +276,15 @@ export async function publishToProfileAction(input: PublishInput): Promise<Actio
       profileConnectionId: v.profileConnectionId,
       caption: v.caption,
       privacyLevel: v.privacyLevel,
+      interactions: v.interactions,
+      ...(v.disclosure.enabled
+        ? {
+            disclosure: {
+              yourBrand: v.disclosure.yourBrand,
+              brandedContent: v.disclosure.brandedContent,
+            },
+          }
+        : {}),
     });
     return undefined;
   });

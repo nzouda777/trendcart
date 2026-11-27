@@ -31,6 +31,7 @@ import type { StatusTone } from "../product-status";
 import { ProductThumb } from "../product-thumb";
 import { ComplianceReportView } from "./compliance-report";
 import { PostList, PostToTikTokButton, type PublishRequest } from "./post-dialog";
+import type { TikTokPostingInfoDTO } from "@/lib/services";
 
 const ORIGIN_LABEL: Record<VideoDTO["origin"], string> = {
   imported: "Imported link",
@@ -108,6 +109,11 @@ export type VideoReviewProps = {
     note?: string;
   }) => Promise<ActionResult>;
   onPublish: (input: PublishRequest) => Promise<ActionResult>;
+  /** Fresh TikTok creator_info for the posting screen. */
+  onLoadCreator: (
+    videoId: string,
+    profileConnectionId: string,
+  ) => Promise<ActionResult<TikTokPostingInfoDTO>>;
 };
 
 /**
@@ -183,6 +189,7 @@ function VideoCard({
   onReject,
   onRecheck,
   onPublish,
+  onLoadCreator,
 }: VideoReviewProps & { video: VideoDTO }) {
   const meta = metaOf(v);
   const pill = approvalPill(v);
@@ -380,11 +387,14 @@ function VideoCard({
         <div className="grid gap-2 border-t border-border pt-3">
           <PostToTikTokButton
             videoId={v.id}
+            videoUrl={v.shopifyFileUrl}
+            videoDurationSec={typeof meta.durationSec === "number" ? meta.durationSec : null}
             profiles={profiles}
             posts={v.posts}
             postingAudited={postingAudited}
             defaultCaption={defaultCaption}
             canPublish={canPublish}
+            onLoadCreator={onLoadCreator}
             onPublish={onPublish}
           />
           <PostList posts={v.posts} />

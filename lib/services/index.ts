@@ -44,6 +44,7 @@ export {
   confirmProduct,
   deleteProduct,
   getProduct,
+  importFromImage,
   importFromProductLink,
   importFromTikTok,
   listProducts,
@@ -52,6 +53,15 @@ export {
   type DeleteProductResult,
   type ListProductsInput,
 } from "./products";
+export { claimShopifyStore, getPendingShopifyClaim } from "./shopify-install";
+export {
+  deletePendingImage,
+  listPendingImages,
+  readPendingImage,
+  uploadProductImages,
+  type PendingImageDTO,
+  type UploadImagesResult,
+} from "./product-images";
 export {
   approvePage,
   getProductPipeline,
@@ -66,6 +76,12 @@ export {
   updatePageCopy,
 } from "./pipeline";
 export { launchCampaign, pauseCampaign, resumeCampaign, updateCampaignBudget } from "./campaigns";
+export {
+  CAMPAIGN_LIST_FILTERS,
+  listWorkspaceCampaigns,
+  type CampaignListFilter,
+  type CampaignListItemDTO,
+} from "./campaign-list";
 export {
   duplicateCampaign,
   launchDuplicate,
@@ -86,10 +102,12 @@ export {
   addVideo,
   approveVideo,
   approveVideos,
+  getTikTokPostingInfo,
   publishToProfile,
   recheckVideo,
   refreshTikTokPosts,
   rejectVideo,
+  type TikTokPostingInfoDTO,
 } from "./videos";
 export { listMembers, type MemberDirectory } from "./team";
 export type * from "./types";

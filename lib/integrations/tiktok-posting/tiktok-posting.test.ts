@@ -360,6 +360,35 @@ const publishInput = {
 };
 
 describe("tiktok posting live: publishVideoFromUrl (stubbed transport)", () => {
+  it("sends the user's interaction choices, never re-enabling what the creator disabled", async () => {
+    const { fetch, calls } = postingStub({});
+    await postingLive(fetch).publishVideoFromUrl({
+      ...publishInput,
+      interactions: { allowComment: false, allowDuet: true, allowStitch: true },
+      disclosure: { yourBrand: true, brandedContent: false },
+    });
+    const init = calls.find((c) => c.url.endsWith("/video/init/"))!;
+    // Fixture creator: comments allowed, duet and stitch disabled in the account.
+    expect((init.body as { post_info: Record<string, unknown> }).post_info).toMatchObject({
+      disable_comment: true,
+      disable_duet: true,
+      disable_stitch: true,
+      brand_organic_toggle: true,
+      brand_content_toggle: false,
+    });
+  });
+
+  it("refuses private branded content before any request", async () => {
+    const { fetch, calls } = postingStub({});
+    await expect(
+      postingLive(fetch).publishVideoFromUrl({
+        ...publishInput,
+        disclosure: { yourBrand: false, brandedContent: true },
+      }),
+    ).rejects.toThrow(/cannot be set to private/);
+    expect(calls.some((c) => c.url.endsWith("/video/init/"))).toBe(false);
+  });
+
   it("queries creator info, inits FILE_UPLOAD and streams every chunk by Range", async () => {
     const { fetch, calls, plan, size } = postingStub({});
     expect(await postingLive(fetch).publishVideoFromUrl(publishInput)).toEqual({
@@ -387,6 +416,8 @@ describe("tiktok posting live: publishVideoFromUrl (stubbed transport)", () => {
         disable_comment: false,
         disable_duet: true,
         disable_stitch: true,
+        brand_organic_toggle: false,
+        brand_content_toggle: false,
       },
       source_info: {
         source: "FILE_UPLOAD",

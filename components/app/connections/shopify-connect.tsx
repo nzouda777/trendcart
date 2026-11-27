@@ -1,3 +1,5 @@
+import { ExternalLinkIcon } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 
 import { TextField } from "../form-controls";
@@ -10,6 +12,31 @@ import { TextField } from "../form-controls";
  */
 
 const INSTALL = "/api/shopify/install";
+
+/**
+ * Public app, once listed: stores install Trendcart from Shopify (App Store
+ * requirement 2.3.1: no shop domain typed in Trendcart). Shopify then opens
+ * /api/shopify/launch, and the store is connected on /app/connections/shopify-claim.
+ */
+export function ShopifyInstallLink({ href }: { href: string }) {
+  return (
+    <div className="grid gap-2">
+      <p className="text-sm text-muted-foreground">
+        Install Trendcart from Shopify on the store, then choose this brand when Trendcart opens.
+        Already installed? Open Trendcart from the store&apos;s admin (Apps).
+      </p>
+      <div>
+        <Button asChild size="lg">
+          <a href={href} target="_blank" rel="noopener noreferrer">
+            Install on Shopify
+            <ExternalLinkIcon aria-hidden="true" />
+            <span className="sr-only">(opens in a new tab)</span>
+          </a>
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function ShopifyPublicConnectForm({ brandId }: { brandId: string }) {
   return (

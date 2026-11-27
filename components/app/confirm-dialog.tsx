@@ -30,6 +30,7 @@ export function ConfirmDialog({
   onSuccess,
   errorAction,
   confirmDisabled = false,
+  onOpenChange,
   children,
 }: {
   trigger: ReactNode;
@@ -43,6 +44,8 @@ export function ConfirmDialog({
   errorAction?: (failure: ServiceFailure, close: () => void) => ReactNode;
   /** Keeps the confirm button disabled (e.g. until a required choice is made). */
   confirmDisabled?: boolean;
+  /** Called when the dialog opens or closes (e.g. to load fresh data on open). */
+  onOpenChange?: (open: boolean) => void;
   /** Extra content (inputs) between the description and the buttons. */
   children?: ReactNode;
 }) {
@@ -77,6 +80,7 @@ export function ConfirmDialog({
         if (pending) return;
         setOpen(next);
         if (!next) setFailure(null);
+        onOpenChange?.(next);
       }}
     >
       <AlertDialog.Trigger asChild>{trigger}</AlertDialog.Trigger>
